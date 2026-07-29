@@ -43,16 +43,14 @@ build directly with `code --install-extension vscode-ifc-viewer-1.0.0.vsix`.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and the full test gate. In
-short:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, project layout, and the
+checks every change has to keep green. In short:
 
 ```sh
 npm install
-npx playwright install chromium
 npm run typecheck
 npm run lint
-npm test          # vitest (Node): engine, tree, and property logic
-npm run test:e2e  # Playwright (headless WebGL): render and interaction
+npm run package -w packages/extension
 ```
 
 Contributors can press `F5` in VS Code to launch the extension in an

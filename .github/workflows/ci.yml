@@ -1,5 +1,11 @@
 name: CI
 
+# The published repository carries the shipping source, not the test suites or
+# the IFC fixtures they load (see .gitignore), so this gate runs the checks a
+# fresh clone can actually complete: strict types, lint, and a real package
+# build. The full suite (vitest, Playwright, @vscode/test-electron) runs in the
+# maintainer tree before each release.
+
 on:
   push:
     branches: [main]
@@ -20,39 +26,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install Playwright Chromium
-        run: npx playwright install --with-deps chromium
-
       - name: Typecheck
         run: npm run typecheck
 
       - name: Lint
         run: npm run lint
 
-      - name: Unit tests (vitest, Node)
-        run: npm test
-
-      # Pixel-snapshot baselines are platform-specific. The committed baselines
-      # are for the dev OS (win32); seed Linux baselines once via the
-      # "Update snapshots" workflow so this step is green on ubuntu runners.
-      - name: E2E tests (Playwright, headless WebGL)
-        run: xvfb-run -a npm run test:e2e
-
-      - name: Extension host tests (@vscode/test-electron)
-        run: xvfb-run -a npm run test:ext
-
       - name: Package VSIX
         run: npm run package
 
-      - name: Extension host tests against the packaged build
-        run: xvfb-run -a npm run test:ext:packaged -w packages/extension
-
-      - name: Upload artifacts
+      - name: Upload VSIX
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: artifacts
-          path: |
-            playwright-report/**
-            *.vsix
+          name: vsix
+          path: '*.vsix'
           if-no-files-found: ignore

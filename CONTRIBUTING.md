@@ -14,11 +14,9 @@ setup, the test gate, and the conventions the project follows.
 
 ```sh
 npm install
-npx playwright install chromium
 ```
 
-This installs the workspace dependencies and the headless Chromium build that
-the visual tests render into.
+This installs the workspace dependencies for both packages.
 
 ## Running the extension
 
@@ -45,47 +43,40 @@ Every change must keep the following green before it is committed:
 ```sh
 npm run typecheck   # tsc strict, all TypeScript projects
 npm run lint        # eslint (flat config)
-npm test            # vitest (Node): engine, tree, and property logic
-npm run test:e2e    # Playwright (headless WebGL): render and interaction
-npm run test:ext -w packages/extension    # @vscode/test-electron
 npm run package -w packages/extension     # vsce package
 ```
 
-The same gate runs in CI on `ubuntu-latest` under `xvfb`.
+These three run on every push and pull request in CI on `ubuntu-latest`.
 
-Notes:
-
-- `npm run test:ext` launches a real VS Code instance. On CI it uses the stable
-  build under `xvfb`. On a developer machine where a system VS Code update is in
-  progress, set `VSCODE_VERSION=insiders` to use a separate build.
-- Playwright pixel baselines are platform-specific because SwiftShader rasterizes
-  differently per OS. They are committed with a platform suffix (for example
-  `...-win32.png`). Regenerate them for your platform only when a visual change
-  is intended: `npm run test:e2e -- --update-snapshots`, then commit the PNGs.
+Behind them sits a larger suite that runs in the maintainer tree before each
+release: vitest for engine, tree, property and layer-boundary logic; Playwright
+for headless-WebGL render and interaction tests; and `@vscode/test-electron` for
+the extension host, including a run against the packaged `.vsix`. The suites and
+the IFC files they load are not part of the published repository, so a fresh
+clone cannot run them. Please describe how you verified a change in the pull
+request, and open an issue first for anything that needs new test coverage.
 
 ## Conventions
 
 - **Layer boundaries are enforced by tests.** `packages/extension` must not
   import `three` or `web-ifc`, and `packages/viewer-core` must not import
-  `vscode`. The checks live in `tests/architecture.test.ts`. Do not remove or
-  weaken them.
+  `vscode`. Do not add an import that crosses those lines.
 - **All engine access goes through the adapter** in
   `packages/viewer-core/src/engine/`. Nothing else may import `web-ifc`.
 - **Structural assertions come first.** Visual snapshots exist as a secondary
   signal. A test should assert mesh counts, triangle counts, bounds, or DOM text
   so a snapshot difference is never the only thing that fails. Do not loosen a
   structural assertion to make a test pass.
-- **Regenerate snapshots only for intentional visual changes,** and say so in the
-  commit message.
-- **Fixtures are generated, not downloaded.** Regenerate them with
-  `npm run fixtures` (Python + `ifcopenshell`).
+- **Fixtures are generated, not downloaded.** Build a local set with
+  `npm run fixtures` (Python + `ifcopenshell`) if you need IFC files to try the
+  viewer against.
 
 ## Commits and pull requests
 
 - Keep commits focused and write a clear subject line.
-- Make sure the full gate is green.
-- Describe user-visible changes in [CHANGELOG.md](CHANGELOG.md) under an
-  Unreleased heading.
+- Make sure the gate above is green.
+- Call out user-visible changes in the pull request description so they can be
+  picked up for the release notes.
 
 ## Scope
 
