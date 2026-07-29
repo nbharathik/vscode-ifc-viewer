@@ -1,0 +1,24 @@
+{
+  "name": "@vscode-ifc-viewer/core",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Framework-agnostic IFC viewer: web-ifc parsing + Three.js rendering + plain-DOM panels.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/viewer.ts",
+    "./engine": "./src/engine/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "harness:build": "vite build",
+    "harness:serve": "vite build && vite preview --port 4317 --strictPort --host 127.0.0.1"
+  },
+  "dependencies": {
+    "three": "0.184.0",
+    "web-ifc": "0.0.77"
+  },
+  "devDependencies": {
+    "@types/three": "0.184.1"
+  }
+}

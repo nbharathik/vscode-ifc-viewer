@@ -1,0 +1,46 @@
+{
+  // Build tasks for the extension launch configs. "watch extension" runs
+  // esbuild in watch mode: edits to extension or viewer-core sources rebuild
+  // automatically; reload the Extension Development Host (Ctrl+R) to pick
+  // them up, or use "Developer: Reload Webviews" for viewer-only changes.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build extension",
+      "type": "shell",
+      "command": "npm run build",
+      "options": {
+        "cwd": "${workspaceFolder}/packages/extension"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "watch extension",
+      "type": "shell",
+      "command": "npm run build:watch",
+      "options": {
+        "cwd": "${workspaceFolder}/packages/extension"
+      },
+      "isBackground": true,
+      "group": "build",
+      "presentation": {
+        "reveal": "never",
+        "panel": "dedicated"
+      },
+      "problemMatcher": {
+        "owner": "esbuild",
+        "fileLocation": "absolute",
+        "pattern": {
+          "regexp": "^[✘X] \\[ERROR\\] (.*)$",
+          "message": 1
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "\\[watch\\] build started",
+          "endsPattern": "(\\[watch\\] build finished|esbuild watching)"
+        }
+      }
+    }
+  ]
+}

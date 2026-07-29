@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["tests/**/*.ts", "vitest.config.ts", "playwright.config.ts"],
+  "exclude": ["node_modules", "**/dist", "**/node_modules"]
+}

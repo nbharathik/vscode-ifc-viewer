@@ -1,0 +1,70 @@
+{
+  "name": "vscode-ifc-viewer",
+  "displayName": "IFC Viewer",
+  "description": "Open and explore IFC (.ifc) building models in a real 3D viewer inside VS Code: orbit, spatial tree, selection, properties and psets.",
+  "version": "1.0.0",
+  "publisher": "BharathikannanN",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": ["Visualization", "Other"],
+  "keywords": ["ifc", "bim", "3d", "viewer", "buildingSMART", "ifcopenshell"],
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nbharathik/vscode-ifc-viewer"
+  },
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onCustomEditor:vscodeIfcViewer.editor",
+    "onCommand:vscodeIfcViewer.resetView",
+    "onCommand:vscodeIfcViewer.showStatistics"
+  ],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "vscodeIfcViewer.editor",
+        "displayName": "IFC Viewer",
+        "selector": [
+          {
+            "filenamePattern": "*.ifc"
+          }
+        ],
+        "priority": "default"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vscodeIfcViewer.resetView",
+        "title": "Reset View",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.showStatistics",
+        "title": "Show Statistics",
+        "category": "IFC Viewer"
+      }
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "node esbuild.mjs",
+    "build:watch": "node esbuild.mjs --watch",
+    "compile:test": "tsc -p tsconfig.test.json",
+    "test:ext": "npm run build && npm run compile:test && node ./out-test/test/runTest.js",
+    "test:ext:packaged": "npm run build && npm run compile:test && node ./out-test/test/runTestPackaged.js",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies -o ../../vscode-ifc-viewer-1.0.0.vsix"
+  },
+  "dependencies": {
+    "@vscode-ifc-viewer/core": "1.0.0"
+  },
+  "devDependencies": {
+    "@types/mocha": "10.0.10",
+    "@types/vscode": "1.96.0",
+    "@vscode/test-electron": "3.0.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.28.1",
+    "mocha": "11.7.6"
+  }
+}

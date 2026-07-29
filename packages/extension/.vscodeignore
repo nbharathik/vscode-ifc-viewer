@@ -1,0 +1,13 @@
+# Everything not needed at runtime is excluded from the .vsix.
+# The extension ships only the esbuild bundles + wasm + media + docs.
+src/**
+out-test/**
+.vscode-test/**
+tsconfig*.json
+esbuild.mjs
+**/*.ts
+**/*.map
+.gitignore
+.eslintrc*
+node_modules/**
+**/*.tsbuildinfo

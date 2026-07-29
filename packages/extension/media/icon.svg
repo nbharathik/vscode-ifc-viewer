@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1f6feb"/>
+      <stop offset="1" stop-color="#0b3a8c"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
+  <!-- Isometric building: three stacked storeys -->
+  <g transform="translate(64 70)" stroke="#0b2a5e" stroke-width="2" stroke-linejoin="round">
+    <!-- bottom storey -->
+    <polygon points="0,28 34,8 0,-12 -34,8" fill="#cfe0ff"/>
+    <polygon points="-34,8 0,28 0,44 -34,24" fill="#7aa2e8"/>
+    <polygon points="34,8 0,28 0,44 34,24" fill="#a7c4f5"/>
+    <!-- middle storey -->
+    <polygon points="0,4 34,-16 0,-36 -34,-16" fill="#e6efff"/>
+    <polygon points="-34,-16 0,4 0,20 -34,0" fill="#7aa2e8"/>
+    <polygon points="34,-16 0,4 0,20 34,0" fill="#a7c4f5"/>
+    <!-- top storey -->
+    <polygon points="0,-20 34,-40 0,-60 -34,-40" fill="#ffffff"/>
+    <polygon points="-34,-40 0,-20 0,-4 -34,-24" fill="#7aa2e8"/>
+    <polygon points="34,-40 0,-20 0,-4 34,-24" fill="#a7c4f5"/>
+  </g>
+</svg>

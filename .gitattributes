@@ -1,0 +1,17 @@
+# Keep committed IFC fixtures byte-exact (LF) across platforms so the
+# deterministic generator's output matches the repo on every checkout.
+*.ifc    -text
+*.ifc.gz binary
+*.png    binary
+*.vsix   binary
+*.wasm   binary
+
+# Normalize source to LF regardless of host line-ending settings.
+*.ts     text eol=lf
+*.js     text eol=lf
+*.mjs    text eol=lf
+*.json   text eol=lf
+*.py     text eol=lf
+*.md     text eol=lf
+*.yml    text eol=lf
+*.html   text eol=lf

@@ -1,0 +1,54 @@
+{
+  // Run the IFC Viewer in a VS Code Extension Development Host.
+  //
+  //   - "watch mode" builds once, then rebuilds on every source edit; after an
+  //     edit press Ctrl+R in the dev host (or "Developer: Reload Webviews" for
+  //     viewer-only changes) to pick it up.
+  //   - Both configs open the fixtures/ folder so test models are one click
+  //     away. "alongside other extensions" keeps your installed extensions
+  //     enabled to verify coexistence (e.g. with IFC language extensions).
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run IFC Viewer Extension (watch)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/packages/extension",
+        "--disable-extensions",
+        "${workspaceFolder}/fixtures"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/packages/extension/dist/**/*.js"
+      ],
+      "preLaunchTask": "watch extension"
+    },
+    {
+      "name": "Run IFC Viewer Extension (single build)",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/packages/extension",
+        "--disable-extensions",
+        "${workspaceFolder}/fixtures"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/packages/extension/dist/**/*.js"
+      ],
+      "preLaunchTask": "build extension"
+    },
+    {
+      "name": "Run IFC Viewer alongside other extensions",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "--extensionDevelopmentPath=${workspaceFolder}/packages/extension",
+        "${workspaceFolder}/fixtures"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/packages/extension/dist/**/*.js"
+      ],
+      "preLaunchTask": "watch extension"
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+name: Update snapshots
+
+# One-time / on-demand seeding of platform-specific Playwright pixel baselines.
+# The dev host commits win32 baselines; run this on the CI OS (ubuntu) to
+# generate and commit the matching *-linux baselines so the CI e2e gate is green.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Regenerate baselines
+        run: xvfb-run -a npm run test:e2e -- --update-snapshots
+
+      - name: Commit baselines
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packages/viewer-core/tests/**/__snapshots__/**
+          if git diff --cached --quiet; then
+            echo "No snapshot changes."
+          else
+            git commit -m "ci: seed Linux Playwright snapshot baselines"
+            git push
+          fi

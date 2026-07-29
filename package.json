@@ -1,0 +1,38 @@
+{
+  "name": "vscode-ifc-viewer-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Monorepo for vscode-ifc-viewer: a 3D IFC viewer custom editor for VS Code.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/viewer-core",
+    "packages/extension"
+  ],
+  "scripts": {
+    "typecheck": "tsc -p packages/viewer-core/tsconfig.json --noEmit && tsc -p packages/extension/tsconfig.json --noEmit && tsc -p packages/extension/tsconfig.webview.json --noEmit && tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:ext": "npm run test:ext -w packages/extension",
+    "build": "npm run build -w packages/viewer-core && npm run build -w packages/extension",
+    "harness:build": "npm run harness:build -w packages/viewer-core",
+    "harness:serve": "npm run harness:serve -w packages/viewer-core",
+    "fixtures": "python scripts/build_fixtures.py",
+    "bench": "node scripts/bench.mjs",
+    "package": "npm run package -w packages/extension"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.61.0",
+    "@types/node": "26.0.0",
+    "eslint": "10.5.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.61.1",
+    "vite": "8.0.16",
+    "vitest": "4.1.9"
+  }
+}
