@@ -17,6 +17,7 @@ worker, geometry streams in progressively, and rendering is GPU-batched.
 | Selection | Click in 3D to highlight, reveal in the tree, and show properties. |
 | Properties | Direct attributes plus every property set and quantity set with values. |
 | Visibility | Hide, isolate, show all, per-node toggles, and a layers menu for spaces and openings. |
+| Panels | One control hides the spatial tree and the properties panel together so the model fills the tab, and restores them with the selection intact. |
 | Theme | Follows your VS Code light or dark theme. |
 | Statistics | Entity counts by class, file size, and load phase timings. |
 | Performance HUD | Press `P` for live render time, draw calls, and the load timeline. |
@@ -38,6 +39,9 @@ Open any `.ifc` file and the IFC Viewer editor opens automatically.
 | `A` | Show all |
 | `P` | Toggle the performance HUD |
 | `Esc` | Clear the selection |
+
+The panels button, beside the layers menu at the top right, hides the spatial
+tree and the properties panel together and restores them.
 
 Commands: **IFC Viewer: Reset View** and **IFC Viewer: Show Statistics**.
 

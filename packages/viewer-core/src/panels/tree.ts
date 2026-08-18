@@ -206,6 +206,14 @@ export class TreePanel {
     else this.expand(expressID);
   }
 
+  /**
+   * Scroll the selected row back into view. The viewer calls this when the
+   * panel becomes visible again, since a hidden panel loses its scroll offset.
+   */
+  revealSelection(): void {
+    if (this.selected !== null) this.reveal(this.selected);
+  }
+
   /** Expand ancestors and highlight the node for a 3D selection. */
   private reveal(expressID: number | null): void {
     if (this.selected !== null) {

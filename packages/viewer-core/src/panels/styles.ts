@@ -23,6 +23,11 @@ const CSS = `
 }
 .ifc-panel--right { right: 8px; }
 .ifc-panel--left { left: 8px; }
+/* Panels hidden: the spatial tree and the properties panel leave the viewport
+   together, so only the model and its overlay controls remain. The view
+   controls slide to the edge the properties panel vacated. */
+.ifc-panels-hidden .ifc-panel { display: none; }
+.ifc-panels-hidden .ifc-tools { right: 8px; }
 .ifc-panel__header {
   padding: 8px 10px;
   font-weight: 600;
@@ -123,7 +128,7 @@ const CSS = `
 .ifc-tree-node--hidden > .ifc-tree-row .ifc-tree-label { opacity: 0.4; }
 .ifc-tree-children { margin-left: 12px; }
 
-/* View-options menu (icon toggle beside the properties panel) */
+/* View controls (icon buttons beside the properties panel) */
 .ifc-tools {
   position: absolute;
   top: 8px;
@@ -133,6 +138,11 @@ const CSS = `
   flex-direction: column;
   align-items: flex-end;
   font-family: var(--vscode-font-family, system-ui, sans-serif);
+}
+.ifc-tools__buttons {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
 }
 .ifc-tools__toggle {
   width: 30px;
@@ -153,6 +163,13 @@ const CSS = `
 .ifc-tools__toggle[aria-expanded="true"] {
   background: var(--vscode-button-background, #0e639c);
   color: var(--vscode-button-foreground, #ffffff);
+}
+/* Keyboard focus has to be visible: these buttons are the only way back once
+   the panels are hidden. */
+.ifc-tools__toggle:focus-visible,
+.ifc-tools__menu button:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, #0078d4);
+  outline-offset: 1px;
 }
 .ifc-tools__menu {
   display: none;

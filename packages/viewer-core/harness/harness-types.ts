@@ -37,6 +37,10 @@ export interface HarnessHooks {
   setCategoryVisible(category: LazyCategory, visible: boolean): Promise<void>;
   isCategoryVisible(category: LazyCategory): boolean;
   showStatistics(): void;
+  /** Spatial tree + properties panel, shown and hidden as one state. */
+  setPanelsVisible(visible: boolean): void;
+  arePanelsVisible(): boolean;
+  togglePanels(): void;
   /** Apply an emulated VS Code theme (harness only) and recolor the viewer. */
   setTheme(kind: 'light' | 'dark'): void;
   /** Ordered list of load-progress phases from the most recent load. */

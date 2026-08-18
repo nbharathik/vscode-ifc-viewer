@@ -97,6 +97,13 @@ export interface Viewer {
   showStatistics(): void;
   /** Toggle the performance HUD (also bound to P). */
   togglePerfHud(): void;
+  /**
+   * Show or hide the spatial tree and the properties panel together, leaving
+   * the model, its controls, and the overlays untouched. Panels start visible.
+   */
+  setPanelsVisible(visible: boolean): void;
+  arePanelsVisible(): boolean;
+  togglePanels(): void;
   /** Re-read VS Code theme CSS variables and recolor the viewport. */
   updateTheme(): void;
   fitToModel(): CameraPose;
@@ -118,6 +125,9 @@ export interface Viewer {
 /** Minimum ms between renders while mesh batches stream in. */
 const PROGRESSIVE_RENDER_INTERVAL = 150;
 
+/** Container class applied while the side panels are hidden (see styles.ts). */
+const PANELS_HIDDEN_CLASS = 'ifc-panels-hidden';
+
 class ViewerImpl implements Viewer {
   private engine: AsyncIfcEngine | null = null;
   private readonly scene: SceneController;
@@ -138,6 +148,7 @@ class ViewerImpl implements Viewer {
   private loading = false;
   private loadToken = 0;
   private selection: number | null = null;
+  private panelsVisible = true;
   private cachedTree: SpatialNode | null = null;
   private readonly loadedCategories = new Set<LazyCategory>();
   private readonly selectionListeners = new Set<(expressID: number | null) => void>();
@@ -503,6 +514,30 @@ class ViewerImpl implements Viewer {
     this.perfHud.toggle();
   }
 
+  // -- side panels --------------------------------------------------------
+  /**
+   * Both panels are overlays on top of the canvas, so hiding them is a single
+   * class on the container: the model keeps its size and state, and the extra
+   * viewport area becomes usable immediately.
+   */
+  setPanelsVisible(visible: boolean): void {
+    if (visible === this.panelsVisible) return;
+    this.panelsVisible = visible;
+    this.container.classList.toggle(PANELS_HIDDEN_CLASS, !visible);
+    this.toolbar?.syncPanelsState();
+    // A hidden panel does not keep its scroll offset, so bring the selected
+    // row back into view when the tree returns.
+    if (visible) this.treePanel?.revealSelection();
+  }
+
+  arePanelsVisible(): boolean {
+    return this.panelsVisible;
+  }
+
+  togglePanels(): void {
+    this.setPanelsVisible(!this.panelsVisible);
+  }
+
   updateTheme(): void {
     const styles = getComputedStyle(this.container);
     const bg =
@@ -581,6 +616,7 @@ class ViewerImpl implements Viewer {
     this.errorCard.dispose();
     this.controls.dispose();
     this.scene.dispose();
+    this.container.classList.remove(PANELS_HIDDEN_CLASS);
     if (this.canvas.parentElement === this.container) {
       this.container.removeChild(this.canvas);
     }

@@ -24,6 +24,9 @@ in progressively, and rendering is GPU-batched.
 - **Visibility**: hide, isolate, or show all, with per-node toggles and a
   layers menu for spaces and openings. Isolate a single storey to inspect it
   on its own.
+- **Panels**: one control hides the spatial tree and the properties panel
+  together, giving the model the full width of the tab, and restores them
+  with the selection intact.
 - **Theme**: the viewport and panels follow your VS Code light or dark theme.
 - **Statistics**: entity counts by class, file size, and load phase timings.
 - **Performance HUD**: press `P` for live render time, draw calls, and the
@@ -38,8 +41,9 @@ now and tracked for later releases.
 ## Install
 
 From the Visual Studio Marketplace: search for "IFC Viewer", or run
-`code --install-extension vscode-ifc-viewer`. You can also install a packaged
-build directly with `code --install-extension vscode-ifc-viewer-1.0.0.vsix`.
+`code --install-extension BharathikannanN.vscode-ifc-viewer`. You can also
+install a packaged build directly with
+`code --install-extension vscode-ifc-viewer-1.1.0.vsix`.
 
 ## Contributing
 
@@ -80,6 +84,12 @@ panel on the right.
 - With a selection: `H` hides it, `I` isolates it, `A` shows everything
   again. Each tree node also has its own visibility toggle.
 - The layers menu toggles categories such as spaces and openings.
+
+**See more of the model**
+
+- The panels button, next to the layers menu, hides the spatial tree and the
+  properties panel together so the model fills the tab. Press it again to
+  bring both back; your selection and camera are kept.
 
 **Diagnostics**
 
