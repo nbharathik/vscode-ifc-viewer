@@ -29,6 +29,12 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
     vscode.commands.registerCommand('vscodeIfcViewer.showStatistics', () => {
       provider.postCommandToActive('showStatistics');
     }),
+    vscode.commands.registerCommand('vscodeIfcViewer.toggleTree', () => {
+      provider.postCommandToActive('toggleTree');
+    }),
+    vscode.commands.registerCommand('vscodeIfcViewer.toggleProperties', () => {
+      provider.postCommandToActive('toggleProperties');
+    }),
   );
 
   return {

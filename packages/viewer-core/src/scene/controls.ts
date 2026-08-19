@@ -1,15 +1,19 @@
 // Camera interaction: OrbitControls wiring, fit-to-model / fit-to-element framing,
-// GPU picking, key bindings (F = fit) and resize handling. Renders on change
-// (no continuous RAF) so headless snapshots stay deterministic.
+// deterministic standard views, perspective/orthographic switching, GPU picking,
+// key bindings (F = fit) and resize handling. Renders on change (no continuous
+// RAF) so headless snapshots stay deterministic.
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import type { SceneController, CameraPose } from './scene.js';
+import type { SceneController, CameraPose, ProjectionMode } from './scene.js';
+import type { ModelBounds } from '../engine/types.js';
 
 export interface PickResult {
   expressID: number;
   point: [number, number, number];
 }
+
+export type StandardView = 'iso' | 'top' | 'bottom' | 'front' | 'back' | 'left' | 'right';
 
 export interface ControlHandlers {
   /** Single click on the viewport: pick result, or null when nothing was hit. */
@@ -24,7 +28,20 @@ export interface ControlHandlers {
   onShowAll?: () => void;
   /** P: toggle the performance HUD. */
   onTogglePerfHud?: () => void;
+  /** The user finished an orbit/pan/zoom interaction. */
+  onInteractionEnd?: () => void;
 }
+
+/** Viewing directions (unit-ish) for the standard views; Y is up. */
+const VIEW_DIRECTIONS: Record<StandardView, [number, number, number]> = {
+  iso: [1, 1, 1],
+  top: [0, 1, 0],
+  bottom: [0, -1, 0],
+  front: [0, 0, 1],
+  back: [0, 0, -1],
+  left: [-1, 0, 0],
+  right: [1, 0, 0],
+};
 
 /** Compute a camera pose that frames a sphere (center, radius) along `dir`. */
 function framePose(
@@ -45,6 +62,16 @@ function framePose(
 
 /** Clicks that travelled further than this since pointerdown are drags. */
 const CLICK_MOVE_TOLERANCE_PX = 5;
+
+/** True when the key event happened while typing in a form field. */
+function isEditableTarget(e: KeyboardEvent): boolean {
+  const el = e.target;
+  if (!(el instanceof HTMLElement)) return false;
+  const tag = el.tagName;
+  return (
+    tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable
+  );
+}
 
 export class ViewerControls {
   private readonly orbit: OrbitControls;
@@ -82,6 +109,7 @@ export class ViewerControls {
         this.scene.setResolutionScale(1);
         this.requestRender();
       }
+      this.handlers.onInteractionEnd?.();
     });
 
     this.pointerDownHandler = (e) => {
@@ -105,10 +133,20 @@ export class ViewerControls {
     }
   }
 
-  /** Apply a pose, keeping OrbitControls' target in sync. */
+  /**
+   * Apply a pose, keeping OrbitControls' target in sync. In orthographic
+   * mode the frustum height is derived from the pose distance, so a pose
+   * (position, target, zoom) fully determines the view in both projections.
+   */
   setPose(pose: CameraPose): void {
     this.scene.camera.position.set(...pose.position);
     this.orbit.target.set(...pose.target);
+    if (this.scene.getProjection() === 'orthographic') {
+      this.scene.camera.zoom = pose.zoom ?? 1;
+      const distance = this.scene.camera.position.distanceTo(this.orbit.target);
+      const halfFov = (this.scene.perspectiveCamera.fov * Math.PI) / 360;
+      this.scene.setOrthoHalfHeight(Math.max(distance, 1e-6) * Math.tan(halfFov));
+    }
     this.scene.camera.updateProjectionMatrix();
     this.orbit.update();
     this.requestRender();
@@ -117,28 +155,33 @@ export class ViewerControls {
   getPose(): CameraPose {
     const p = this.scene.camera.position;
     const t = this.orbit.target;
-    return { position: [p.x, p.y, p.z], target: [t.x, t.y, t.z] };
+    const pose: CameraPose = { position: [p.x, p.y, p.z], target: [t.x, t.y, t.z] };
+    if (this.scene.getProjection() === 'orthographic') pose.zoom = this.scene.camera.zoom;
+    return pose;
   }
 
   fitToModel(): CameraPose {
-    const b = this.scene.getBounds();
-    const center = new THREE.Vector3(
-      (b.min.x + b.max.x) / 2,
-      (b.min.y + b.max.y) / 2,
-      (b.min.z + b.max.z) / 2,
-    );
-    const radius =
-      new THREE.Vector3(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z).length() * 0.5;
-    const pose = framePose(center, radius, new THREE.Vector3(1, 0.8, 1), this.scene.camera.fov);
-    this.applyNearFar(radius);
-    this.setPose(pose);
-    return pose;
+    const { center, radius } = this.modelSphere();
+    return this.frameSphere(center, radius, new THREE.Vector3(1, 0.8, 1));
+  }
+
+  /**
+   * Deterministic standard view: keeps the model centered and derives the
+   * distance from the model bounds, like fit-to-model.
+   */
+  standardView(view: StandardView): CameraPose {
+    const { center, radius } = this.modelSphere();
+    return this.frameSphere(center, radius, new THREE.Vector3(...VIEW_DIRECTIONS[view]));
   }
 
   /** Frame a single element by expressID; keeps the current viewing direction. */
   fitToElement(expressID: number): CameraPose | null {
     const bounds = this.scene.getElementBounds(expressID);
-    if (!bounds) return null;
+    return bounds ? this.fitToBounds(bounds) : null;
+  }
+
+  /** Frame an arbitrary AABB, keeping the current viewing direction. */
+  fitToBounds(bounds: ModelBounds): CameraPose | null {
     const box = new THREE.Box3(
       new THREE.Vector3(bounds.min.x, bounds.min.y, bounds.min.z),
       new THREE.Vector3(bounds.max.x, bounds.max.y, bounds.max.z),
@@ -148,10 +191,43 @@ export class ViewerControls {
     const radius = box.getSize(new THREE.Vector3()).length() * 0.5;
     const current = this.scene.camera.position.clone().sub(this.orbit.target);
     const dir = current.lengthSq() > 1e-6 ? current : new THREE.Vector3(1, 0.8, 1);
-    const pose = framePose(center, radius, dir, this.scene.camera.fov, 1.3);
-    this.applyNearFar(radius);
-    this.setPose(pose);
-    return pose;
+    return this.frameSphere(center, radius, dir, 1.3);
+  }
+
+  getProjection(): ProjectionMode {
+    return this.scene.getProjection();
+  }
+
+  /**
+   * Switch projection while preserving the target and the apparent model
+   * size: the orthographic frustum height is derived from the perspective
+   * distance and vice versa.
+   */
+  setProjection(mode: ProjectionMode): void {
+    if (mode === this.scene.getProjection()) return;
+    const persp = this.scene.perspectiveCamera;
+    const ortho = this.scene.orthographicCamera;
+    const target = this.orbit.target.clone();
+    const halfFov = (persp.fov * Math.PI) / 360;
+
+    if (mode === 'orthographic') {
+      const distance = persp.position.distanceTo(target);
+      this.scene.setOrthoHalfHeight(distance * Math.tan(halfFov));
+      ortho.zoom = 1;
+      ortho.position.copy(persp.position);
+    } else {
+      const halfHeight = this.scene.getOrthoHalfHeight() / ortho.zoom;
+      const distance = halfHeight / Math.tan(halfFov);
+      const dir = ortho.position.clone().sub(target);
+      if (dir.lengthSq() < 1e-9) dir.set(1, 0.8, 1);
+      persp.position.copy(target).add(dir.normalize().multiplyScalar(distance));
+    }
+
+    this.scene.setProjection(mode);
+    this.orbit.object = this.scene.camera;
+    this.scene.camera.updateProjectionMatrix();
+    this.orbit.update();
+    this.requestRender();
   }
 
   pickAt(clientX: number, clientY: number): PickResult | null {
@@ -159,11 +235,35 @@ export class ViewerControls {
     return this.scene.pick(clientX - rect.left, clientY - rect.top);
   }
 
+  private modelSphere(): { center: THREE.Vector3; radius: number } {
+    const b = this.scene.getBounds();
+    const center = new THREE.Vector3(
+      (b.min.x + b.max.x) / 2,
+      (b.min.y + b.max.y) / 2,
+      (b.min.z + b.max.z) / 2,
+    );
+    const radius =
+      new THREE.Vector3(b.max.x - b.min.x, b.max.y - b.min.y, b.max.z - b.min.z).length() * 0.5;
+    return { center, radius };
+  }
+
+  /** Shared framing path for fit, standard views and fit-to-element. */
+  private frameSphere(
+    center: THREE.Vector3,
+    radius: number,
+    dir: THREE.Vector3,
+    margin = 1.15,
+  ): CameraPose {
+    const pose = framePose(center, radius, dir, this.scene.perspectiveCamera.fov, margin);
+    this.applyNearFar(radius);
+    // Ortho framing: setPose derives the frustum height from the distance.
+    if (this.scene.getProjection() === 'orthographic') pose.zoom = 1;
+    this.setPose(pose);
+    return pose;
+  }
+
   private applyNearFar(radius: number): void {
-    const cam = this.scene.camera;
-    cam.near = Math.max(radius / 1000, 0.001);
-    cam.far = Math.max(radius * 1000, 100);
-    cam.updateProjectionMatrix();
+    this.scene.setNearFar(Math.max(radius / 1000, 0.001), Math.max(radius * 1000, 100));
   }
 
   /**
@@ -195,14 +295,20 @@ export class ViewerControls {
   private onDoubleClick(e: MouseEvent): void {
     if (this.wasDrag(e)) return;
     const pick = this.pickAt(e.clientX, e.clientY);
-    if (pick) this.fitToElement(pick.expressID);
+    if (pick) {
+      this.fitToElement(pick.expressID);
+      this.handlers.onInteractionEnd?.();
+    }
   }
 
   private onKey(e: KeyboardEvent): void {
+    // Typing in a search or filter field must never drive the viewport.
+    if (isEditableTarget(e)) return;
     switch (e.key) {
       case 'f':
       case 'F':
         this.fitToModel();
+        this.handlers.onInteractionEnd?.();
         break;
       case 'h':
       case 'H':

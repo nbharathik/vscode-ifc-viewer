@@ -12,8 +12,10 @@ import { StatsPanel } from './panels/stats.js';
 import { PerfHud } from './panels/perfHud.js';
 import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
-import type { CameraPose, SceneInfo } from './scene/scene.js';
-import type { PickResult } from './scene/controls.js';
+import { buildSearchIndex, filterElementIDs } from './search.js';
+import type { SearchIndex } from './search.js';
+import type { CameraPose, ProjectionMode, SceneInfo, SectionAxis } from './scene/scene.js';
+import type { PickResult, StandardView } from './scene/controls.js';
 import type {
   AsyncIfcEngine,
   ItemProperties,
@@ -21,12 +23,16 @@ import type {
   LoadProgress,
   LoadSource,
   LoadedModel,
+  ModelBounds,
   ModelStats,
   SpatialNode,
 } from './engine/types.js';
 
 export * from './engine/types.js';
-export type { CameraPose, SceneInfo } from './scene/scene.js';
+export type { CameraPose, ProjectionMode, SceneInfo, SectionAxis } from './scene/scene.js';
+export type { StandardView } from './scene/controls.js';
+export type { SearchEntry, SearchIndex, StoreyInfo } from './search.js';
+export { buildSearchIndex, queryIndex } from './search.js';
 
 export interface ViewerWorkerOptions {
   /** Bundled worker script URL (used with a blob fallback when cross-origin). */
@@ -63,6 +69,35 @@ export interface LoadTimeline {
   totalMs?: number;
 }
 
+export interface SectionState {
+  enabled: boolean;
+  axis: SectionAxis;
+  /** Plane position along the axis, in model space. */
+  position: number;
+  /** false keeps the model below/before the plane; true keeps the other side. */
+  flipped: boolean;
+  /** Model extent along the current axis, for sliders; null before a load. */
+  range: { min: number; max: number } | null;
+}
+
+export interface FilterOptions {
+  /** Element types present in the scene, with element counts. */
+  types: { type: string; count: number }[];
+  /** Storeys from the spatial tree, in document order. */
+  storeys: { expressID: number; name: string | null }[];
+}
+
+/** Serializable snapshot of the working view (used by webview persistence). */
+export interface ViewerViewState {
+  camera: CameraPose;
+  projection: ProjectionMode;
+  treeVisible: boolean;
+  propertiesVisible: boolean;
+  section: { enabled: boolean; axis: SectionAxis; position: number; flipped: boolean };
+  typeFilter: string[] | null;
+  storeyFilter: number[] | null;
+}
+
 export interface Viewer {
   /** Load a model from bytes or a URL. URL loads stream through the worker. */
   load(source: Uint8Array | LoadSource, options?: ViewerLoadOptions): Promise<LoadedModel>;
@@ -74,6 +109,8 @@ export interface Viewer {
   getLoadTimeline(): LoadTimeline | null;
   getSceneInfo(): SceneInfo;
   getSpatialTree(): SpatialNode | null;
+  /** Search index over the spatial tree; built once per load, null before one. */
+  getSearchIndex(): SearchIndex | null;
   getProperties(expressID: number): Promise<ItemProperties | null>;
   /** Select an element: highlight + notify subscribers. null clears. */
   select(expressID: number | null): void;
@@ -83,6 +120,8 @@ export interface Viewer {
   onSelectionChange(listener: (expressID: number | null) => void): () => void;
   /** Subscribe to model-loaded events; returns an unsubscribe function. */
   onModelLoaded(listener: () => void): () => void;
+  /** Subscribe to view-state changes (camera, panels, section, filters). */
+  onViewChanged(listener: () => void): () => void;
   /** Visibility. */
   hideSelected(): void;
   isolateSelected(): void;
@@ -93,21 +132,51 @@ export interface Viewer {
   /** Lazy categories (spaces/openings), hidden by default. Resolves when loaded. */
   setCategoryVisible(category: LazyCategory, visible: boolean): Promise<void>;
   isCategoryVisible(category: LazyCategory): boolean;
+  /** Type/storey filters. Groups AND together; values within a group OR. */
+  getFilterOptions(): FilterOptions;
+  getTypeFilter(): string[] | null;
+  setTypeFilter(types: string[] | null): void;
+  getStoreyFilter(): number[] | null;
+  setStoreyFilter(storeys: number[] | null): void;
+  /** Clear both filter groups (manual hide/isolate state is untouched). */
+  resetFilters(): void;
   /** Toggle the statistics overlay ("Show Statistics" command). */
   showStatistics(): void;
   /** Toggle the performance HUD (also bound to P). */
   togglePerfHud(): void;
+  /** Independent side-panel visibility. */
+  setTreeVisible(visible: boolean): void;
+  isTreeVisible(): boolean;
+  toggleTree(): void;
+  setPropertiesVisible(visible: boolean): void;
+  arePropertiesVisible(): boolean;
+  toggleProperties(): void;
   /**
-   * Show or hide the spatial tree and the properties panel together, leaving
-   * the model, its controls, and the overlays untouched. Panels start visible.
+   * Convenience for both panels at once (kept for 1.1.0 compatibility):
+   * hides both when either is visible, restores both when both are hidden.
    */
   setPanelsVisible(visible: boolean): void;
   arePanelsVisible(): boolean;
   togglePanels(): void;
+  /** Single axis-aligned section plane (GPU clipping; no geometry rebuilds). */
+  getSectionState(): SectionState;
+  setSectionEnabled(enabled: boolean): void;
+  setSectionAxis(axis: SectionAxis): void;
+  setSectionPosition(position: number): void;
+  setSectionFlipped(flipped: boolean): void;
+  /** Re-center the plane on the current axis and clear the flip. */
+  resetSection(): void;
   /** Re-read VS Code theme CSS variables and recolor the viewport. */
   updateTheme(): void;
   fitToModel(): CameraPose;
   fitToElement(expressID: number): CameraPose | null;
+  /** Frame the current selection (subtree bounds); null without a selection. */
+  fitToSelection(): CameraPose | null;
+  /** Deterministic standard camera poses (top/front/right/... and isometric). */
+  setStandardView(view: StandardView): CameraPose;
+  getProjection(): ProjectionMode;
+  /** Switch projection, preserving the target and apparent model size. */
+  setProjection(mode: ProjectionMode): void;
   pickAt(clientX: number, clientY: number): PickResult | null;
   getCamera(): CameraPose;
   getViewport(): { width: number; height: number; aspect: number };
@@ -116,6 +185,9 @@ export interface Viewer {
   /** Live GPU resource counts (for leak detection). */
   getRendererInfo(): { geometries: number; textures: number; calls: number; triangles: number };
   setCamera(pose: CameraPose): void;
+  /** Snapshot / restore of the working view for webview persistence. */
+  getViewState(): ViewerViewState;
+  applyViewState(state: Partial<ViewerViewState>): void;
   resize(width: number, height: number): void;
   render(): void;
   isReady(): boolean;
@@ -125,8 +197,13 @@ export interface Viewer {
 /** Minimum ms between renders while mesh batches stream in. */
 const PROGRESSIVE_RENDER_INTERVAL = 150;
 
-/** Container class applied while the side panels are hidden (see styles.ts). */
-const PANELS_HIDDEN_CLASS = 'ifc-panels-hidden';
+/** Container classes applied while a side panel is hidden (see styles.ts). */
+const TREE_HIDDEN_CLASS = 'ifc-tree-hidden';
+const PROPS_HIDDEN_CLASS = 'ifc-props-hidden';
+
+function defaultSection(): SectionState {
+  return { enabled: false, axis: 'y', position: 0, flipped: false, range: null };
+}
 
 class ViewerImpl implements Viewer {
   private engine: AsyncIfcEngine | null = null;
@@ -148,11 +225,19 @@ class ViewerImpl implements Viewer {
   private loading = false;
   private loadToken = 0;
   private selection: number | null = null;
-  private panelsVisible = true;
+  private treeVisible = true;
+  private propsVisible = true;
+  private section: SectionState = defaultSection();
+  /** True once the plane position has been placed for the current model. */
+  private sectionPositioned = false;
+  private typeFilter: string[] | null = null;
+  private storeyFilter: number[] | null = null;
   private cachedTree: SpatialNode | null = null;
+  private searchIndex: SearchIndex | null = null;
   private readonly loadedCategories = new Set<LazyCategory>();
   private readonly selectionListeners = new Set<(expressID: number | null) => void>();
   private readonly modelLoadedListeners = new Set<() => void>();
+  private readonly viewChangedListeners = new Set<() => void>();
 
   constructor(
     private readonly container: HTMLElement,
@@ -175,6 +260,7 @@ class ViewerImpl implements Viewer {
       onIsolate: () => this.isolateSelected(),
       onShowAll: () => this.showAll(),
       onTogglePerfHud: () => this.togglePerfHud(),
+      onInteractionEnd: () => this.emitViewChanged(),
     });
 
     const mountPanels = options.panels ?? true;
@@ -275,7 +361,17 @@ class ViewerImpl implements Viewer {
 
     this.loadedCategories.clear();
     this.cachedTree = null;
+    this.searchIndex = null;
     this.stats = null;
+    // Per-model view tooling resets with the model it applied to.
+    this.section = defaultSection();
+    this.sectionPositioned = false;
+    this.scene.clearSectionPlane();
+    this.typeFilter = null;
+    this.storeyFilter = null;
+    this.scene.setFilter(null);
+    this.toolbar?.syncSection();
+    this.toolbar?.syncFilters();
 
     const normalized: LoadSource =
       source instanceof Uint8Array ? { kind: 'bytes', bytes: source } : source;
@@ -378,6 +474,13 @@ class ViewerImpl implements Viewer {
     return this.cachedTree;
   }
 
+  getSearchIndex(): SearchIndex | null {
+    if (!this.searchIndex && this.cachedTree) {
+      this.searchIndex = buildSearchIndex(this.cachedTree);
+    }
+    return this.searchIndex;
+  }
+
   async getProperties(expressID: number): Promise<ItemProperties | null> {
     if (this.currentModelID === null || !this.engine) return null;
     try {
@@ -421,8 +524,17 @@ class ViewerImpl implements Viewer {
     return () => this.modelLoadedListeners.delete(listener);
   }
 
+  onViewChanged(listener: () => void): () => void {
+    this.viewChangedListeners.add(listener);
+    return () => this.viewChangedListeners.delete(listener);
+  }
+
   private emitSelection(): void {
     for (const listener of this.selectionListeners) listener(this.selection);
+  }
+
+  private emitViewChanged(): void {
+    for (const listener of this.viewChangedListeners) listener();
   }
 
   // -- visibility ---------------------------------------------------------
@@ -463,6 +575,7 @@ class ViewerImpl implements Viewer {
     this.scene.render();
   }
 
+  /** Clears manual hide/isolate state; active filters are left untouched. */
   showAll(): void {
     this.scene.showAll();
     this.scene.render();
@@ -506,6 +619,59 @@ class ViewerImpl implements Viewer {
     return this.scene.getCategoryVisible(category);
   }
 
+  // -- filters ------------------------------------------------------------
+  getFilterOptions(): FilterOptions {
+    return {
+      types: this.scene.typesWithCounts(),
+      storeys: this.getSearchIndex()?.storeys ?? [],
+    };
+  }
+
+  getTypeFilter(): string[] | null {
+    return this.typeFilter ? [...this.typeFilter] : null;
+  }
+
+  setTypeFilter(types: string[] | null): void {
+    this.typeFilter = types ? [...types] : null;
+    this.applyFilters();
+  }
+
+  getStoreyFilter(): number[] | null {
+    return this.storeyFilter ? [...this.storeyFilter] : null;
+  }
+
+  setStoreyFilter(storeys: number[] | null): void {
+    this.storeyFilter = storeys ? [...storeys] : null;
+    this.applyFilters();
+  }
+
+  resetFilters(): void {
+    this.typeFilter = null;
+    this.storeyFilter = null;
+    this.applyFilters();
+  }
+
+  /**
+   * Filters map to the same per-element GPU state used by hide/isolate, so
+   * they never rebuild meshes or materials. Manual hiding stays independent.
+   */
+  private applyFilters(): void {
+    const index = this.getSearchIndex();
+    if (!index || (this.typeFilter === null && this.storeyFilter === null)) {
+      this.scene.setFilter(null);
+    } else {
+      this.scene.setFilter(
+        filterElementIDs(index, {
+          types: this.typeFilter ? new Set(this.typeFilter) : null,
+          storeys: this.storeyFilter ? new Set(this.storeyFilter) : null,
+        }),
+      );
+    }
+    this.scene.render();
+    this.toolbar?.syncFilters();
+    this.emitViewChanged();
+  }
+
   showStatistics(): void {
     this.statsPanel?.toggle();
   }
@@ -516,26 +682,132 @@ class ViewerImpl implements Viewer {
 
   // -- side panels --------------------------------------------------------
   /**
-   * Both panels are overlays on top of the canvas, so hiding them is a single
+   * The panels are overlays on top of the canvas, so hiding one is a single
    * class on the container: the model keeps its size and state, and the extra
    * viewport area becomes usable immediately.
    */
-  setPanelsVisible(visible: boolean): void {
-    if (visible === this.panelsVisible) return;
-    this.panelsVisible = visible;
-    this.container.classList.toggle(PANELS_HIDDEN_CLASS, !visible);
-    this.toolbar?.syncPanelsState();
+  setTreeVisible(visible: boolean): void {
+    if (visible === this.treeVisible) return;
+    this.treeVisible = visible;
+    this.container.classList.toggle(TREE_HIDDEN_CLASS, !visible);
     // A hidden panel does not keep its scroll offset, so bring the selected
     // row back into view when the tree returns.
     if (visible) this.treePanel?.revealSelection();
+    this.emitViewChanged();
+  }
+
+  isTreeVisible(): boolean {
+    return this.treeVisible;
+  }
+
+  toggleTree(): void {
+    this.setTreeVisible(!this.treeVisible);
+  }
+
+  setPropertiesVisible(visible: boolean): void {
+    if (visible === this.propsVisible) return;
+    this.propsVisible = visible;
+    this.container.classList.toggle(PROPS_HIDDEN_CLASS, !visible);
+    this.emitViewChanged();
+  }
+
+  arePropertiesVisible(): boolean {
+    return this.propsVisible;
+  }
+
+  toggleProperties(): void {
+    this.setPropertiesVisible(!this.propsVisible);
+  }
+
+  setPanelsVisible(visible: boolean): void {
+    this.setTreeVisible(visible);
+    this.setPropertiesVisible(visible);
   }
 
   arePanelsVisible(): boolean {
-    return this.panelsVisible;
+    return this.treeVisible || this.propsVisible;
   }
 
   togglePanels(): void {
-    this.setPanelsVisible(!this.panelsVisible);
+    this.setPanelsVisible(!this.arePanelsVisible());
+  }
+
+  // -- section plane ------------------------------------------------------
+  getSectionState(): SectionState {
+    return { ...this.section, range: this.sectionRange() };
+  }
+
+  setSectionEnabled(enabled: boolean): void {
+    if (enabled === this.section.enabled) return;
+    this.section.enabled = enabled;
+    if (enabled && !this.sectionPositioned) {
+      // First enable for this model: start at the middle of the axis so the
+      // slice is immediately visible.
+      const range = this.sectionRange();
+      if (range) {
+        this.section.position = (range.min + range.max) / 2;
+        this.sectionPositioned = true;
+      }
+    }
+    this.applySection();
+  }
+
+  setSectionAxis(axis: SectionAxis): void {
+    if (axis === this.section.axis) return;
+    this.section.axis = axis;
+    const range = this.sectionRange();
+    if (range) this.section.position = (range.min + range.max) / 2;
+    this.applySection();
+  }
+
+  setSectionPosition(position: number): void {
+    this.section.position = position;
+    this.applySection();
+  }
+
+  setSectionFlipped(flipped: boolean): void {
+    if (flipped === this.section.flipped) return;
+    this.section.flipped = flipped;
+    this.applySection();
+  }
+
+  resetSection(): void {
+    this.section.flipped = false;
+    const range = this.sectionRange();
+    if (range) this.section.position = (range.min + range.max) / 2;
+    this.applySection();
+  }
+
+  /** Model extent along the current section axis, or null with no model. */
+  private sectionRange(): { min: number; max: number } | null {
+    const b: ModelBounds = this.scene.getBounds();
+    const axis = this.section.axis;
+    const min = b.min[axis];
+    const max = b.max[axis];
+    if (!(max > min)) return null;
+    return { min, max };
+  }
+
+  /**
+   * Recompute the clipping plane from the section state. Enabling attaches
+   * one shared plane to the model materials; moving it is a uniform update.
+   */
+  private applySection(): void {
+    const range = this.sectionRange();
+    if (!this.section.enabled || !range) {
+      this.scene.clearSectionPlane();
+    } else {
+      this.section.position = Math.min(range.max, Math.max(range.min, this.section.position));
+      const normal: [number, number, number] = [0, 0, 0];
+      const axisIndex = this.section.axis === 'x' ? 0 : this.section.axis === 'y' ? 1 : 2;
+      // Unflipped keeps the low side of the axis: n = -axis, c = position.
+      normal[axisIndex] = this.section.flipped ? 1 : -1;
+      const constant = this.section.flipped ? -this.section.position : this.section.position;
+      this.scene.setSectionPlane(normal, constant);
+    }
+    this.scene.render();
+    this.toolbar?.syncSection();
+    this.emitViewChanged();
   }
 
   updateTheme(): void {
@@ -548,16 +820,63 @@ class ViewerImpl implements Viewer {
     }
   }
 
+  // -- camera -------------------------------------------------------------
   fitToModel(): CameraPose {
     const pose = this.controls.fitToModel();
     this.scene.render();
+    this.emitViewChanged();
     return pose;
   }
 
   fitToElement(expressID: number): CameraPose | null {
     const pose = this.controls.fitToElement(expressID);
     this.scene.render();
+    if (pose) this.emitViewChanged();
     return pose;
+  }
+
+  fitToSelection(): CameraPose | null {
+    if (this.selection === null) return null;
+    const ids = this.subtreeElementIds(this.selection);
+    let bounds: ModelBounds | null = null;
+    for (const id of ids) {
+      const b = this.scene.getElementBounds(id);
+      if (!b) continue;
+      if (!bounds) {
+        bounds = { min: { ...b.min }, max: { ...b.max } };
+      } else {
+        bounds.min.x = Math.min(bounds.min.x, b.min.x);
+        bounds.min.y = Math.min(bounds.min.y, b.min.y);
+        bounds.min.z = Math.min(bounds.min.z, b.min.z);
+        bounds.max.x = Math.max(bounds.max.x, b.max.x);
+        bounds.max.y = Math.max(bounds.max.y, b.max.y);
+        bounds.max.z = Math.max(bounds.max.z, b.max.z);
+      }
+    }
+    if (!bounds) return null;
+    const pose = this.controls.fitToBounds(bounds);
+    this.scene.render();
+    if (pose) this.emitViewChanged();
+    return pose;
+  }
+
+  setStandardView(view: StandardView): CameraPose {
+    const pose = this.controls.standardView(view);
+    this.scene.render();
+    this.emitViewChanged();
+    return pose;
+  }
+
+  getProjection(): ProjectionMode {
+    return this.controls.getProjection();
+  }
+
+  setProjection(mode: ProjectionMode): void {
+    if (mode === this.controls.getProjection()) return;
+    this.controls.setProjection(mode);
+    this.scene.render();
+    this.toolbar?.syncProjection();
+    this.emitViewChanged();
   }
 
   pickAt(clientX: number, clientY: number): PickResult | null {
@@ -583,6 +902,51 @@ class ViewerImpl implements Viewer {
   setCamera(pose: CameraPose): void {
     this.controls.setPose(pose);
     this.scene.render();
+    this.emitViewChanged();
+  }
+
+  // -- view state ---------------------------------------------------------
+  getViewState(): ViewerViewState {
+    return {
+      camera: this.getCamera(),
+      projection: this.getProjection(),
+      treeVisible: this.treeVisible,
+      propertiesVisible: this.propsVisible,
+      section: {
+        enabled: this.section.enabled,
+        axis: this.section.axis,
+        position: this.section.position,
+        flipped: this.section.flipped,
+      },
+      typeFilter: this.getTypeFilter(),
+      storeyFilter: this.getStoreyFilter(),
+    };
+  }
+
+  /** Restore a snapshot (tolerates partial/older state objects). */
+  applyViewState(state: Partial<ViewerViewState>): void {
+    if (typeof state.treeVisible === 'boolean') this.setTreeVisible(state.treeVisible);
+    if (typeof state.propertiesVisible === 'boolean') {
+      this.setPropertiesVisible(state.propertiesVisible);
+    }
+    if (state.projection === 'perspective' || state.projection === 'orthographic') {
+      this.setProjection(state.projection);
+    }
+    if (state.camera?.position && state.camera.target) this.setCamera(state.camera);
+    const section = state.section;
+    if (section && (section.axis === 'x' || section.axis === 'y' || section.axis === 'z')) {
+      this.section.axis = section.axis;
+      if (typeof section.position === 'number') {
+        this.section.position = section.position;
+        this.sectionPositioned = true;
+      }
+      this.section.flipped = section.flipped === true;
+      this.section.enabled = section.enabled === true;
+      this.applySection();
+    }
+    if (state.typeFilter !== undefined) this.typeFilter = state.typeFilter;
+    if (state.storeyFilter !== undefined) this.storeyFilter = state.storeyFilter;
+    if (state.typeFilter !== undefined || state.storeyFilter !== undefined) this.applyFilters();
   }
 
   resize(width: number, height: number): void {
@@ -616,7 +980,7 @@ class ViewerImpl implements Viewer {
     this.errorCard.dispose();
     this.controls.dispose();
     this.scene.dispose();
-    this.container.classList.remove(PANELS_HIDDEN_CLASS);
+    this.container.classList.remove(TREE_HIDDEN_CLASS, PROPS_HIDDEN_CLASS);
     if (this.canvas.parentElement === this.container) {
       this.container.removeChild(this.canvas);
     }

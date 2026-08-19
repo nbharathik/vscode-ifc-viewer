@@ -1,8 +1,11 @@
 // Left-overlay spatial tree (plain DOM). Renders Project -> Site -> Building ->
 // Storey -> elements with lazy expansion. Clicking a node selects it (3D
 // highlight + properties); a 3D selection reveals and highlights the node.
-// A per-node eye toggle controls subtree visibility.
+// A per-node eye toggle controls subtree visibility. A debounced search box
+// filters the tree through the model search index (no engine calls).
 import type { SpatialNode } from '../engine/types.js';
+import type { SearchIndex } from '../search.js';
+import { queryIndex } from '../search.js';
 import { ensurePanelStyles } from './styles.js';
 
 // Monochrome eye icons (inherit currentColor) for the visibility toggle.
@@ -17,12 +20,26 @@ function setEyeState(el: HTMLElement, visible: boolean): void {
   el.setAttribute('aria-label', visible ? 'Hide' : 'Show');
 }
 
+/** Header collapse chevron (points into the edge the panel leaves through). */
+const COLLAPSE_LEFT_ICON =
+  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M9.8 3.5 5.3 8l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+/** Edge button glyph: panel frame with the tree column filled. */
+const RAIL_TREE_ICON =
+  '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+  '<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/>' +
+  '<path d="M2.6 3.6h3.2v8.8H2.6Z" fill="currentColor"/>' +
+  '</svg>';
+
 export interface TreeSource {
   getSpatialTree(): SpatialNode | null;
+  getSearchIndex(): SearchIndex | null;
   select(expressID: number | null): void;
   getSelection(): number | null;
   onSelectionChange(listener: (expressID: number | null) => void): () => void;
   onModelLoaded(listener: () => void): () => void;
+  /** Panel visibility, driven by the header collapse and edge show buttons. */
+  isTreeVisible(): boolean;
+  setTreeVisible(visible: boolean): void;
   /** Visibility hooks used by the eye toggle. */
   isSubtreeVisible?(expressID: number): boolean;
   toggleSubtreeVisible?(expressID: number): void;
@@ -30,6 +47,7 @@ export interface TreeSource {
 
 interface NodeEntry {
   node: SpatialNode;
+  wrap: HTMLElement;
   row: HTMLElement;
   childrenWrap: HTMLElement;
   toggle: HTMLElement;
@@ -38,16 +56,28 @@ interface NodeEntry {
 }
 
 const AUTO_EXPAND_DEPTH = 3; // Project, Site, Building expanded; storeys collapsed
+const SEARCH_DEBOUNCE_MS = 120;
+/** Cap on rows revealed per search, so huge result sets stay responsive. */
+const SEARCH_REVEAL_CAP = 200;
 
 export class TreePanel {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
+  private readonly searchInput: HTMLInputElement;
+  private readonly searchCount: HTMLElement;
+  private collapseBtn!: HTMLButtonElement;
+  private railBtn!: HTMLButtonElement;
   private readonly doc: Document;
   private readonly entries = new Map<number, NodeEntry>();
   private readonly parents = new Map<number, number>();
   private readonly unsubSelection: () => void;
   private readonly unsubLoaded: () => void;
   private selected: number | null = null;
+  private searchTimer: number | null = null;
+  /** expressIDs currently marked as shown/matched by the active search. */
+  private searchShown: number[] = [];
+  private searchMatched: number[] = [];
+  private firstMatch: number | null = null;
 
   constructor(
     container: HTMLElement,
@@ -60,10 +90,67 @@ export class TreePanel {
     this.root.className = 'ifc-panel ifc-panel--left';
     this.root.setAttribute('data-testid', 'tree-panel');
 
+    // Header: title on the left, the collapse control right-aligned beside it.
     const header = this.doc.createElement('div');
     header.className = 'ifc-panel__header';
-    header.textContent = 'Spatial Tree';
+    const title = this.doc.createElement('span');
+    title.textContent = 'Spatial Tree';
+    this.collapseBtn = this.doc.createElement('button');
+    this.collapseBtn.className = 'ifc-panel__collapse';
+    this.collapseBtn.setAttribute('data-testid', 'btn-tree-collapse');
+    this.collapseBtn.title = 'Hide spatial tree';
+    this.collapseBtn.setAttribute('aria-label', 'Hide spatial tree');
+    this.collapseBtn.innerHTML = COLLAPSE_LEFT_ICON;
+    this.collapseBtn.addEventListener('click', () => {
+      this.source.setTreeVisible(false);
+      // Keep keyboard users anchored: the way back is the edge button.
+      this.railBtn.focus();
+    });
+    header.append(title, this.collapseBtn);
     this.root.appendChild(header);
+
+    // Edge button shown while the panel is hidden (via the container class).
+    this.railBtn = this.doc.createElement('button');
+    this.railBtn.className = 'ifc-panel-rail ifc-panel-rail--left';
+    this.railBtn.setAttribute('data-testid', 'btn-tree-show');
+    this.railBtn.title = 'Show spatial tree';
+    this.railBtn.setAttribute('aria-label', 'Show spatial tree');
+    this.railBtn.innerHTML = RAIL_TREE_ICON;
+    this.railBtn.addEventListener('click', () => {
+      this.source.setTreeVisible(true);
+      this.collapseBtn.focus();
+    });
+    container.appendChild(this.railBtn);
+
+    // Search row: debounced index queries, result count, one-key clearing.
+    const search = this.doc.createElement('div');
+    search.className = 'ifc-panel__search';
+    this.searchInput = this.doc.createElement('input');
+    this.searchInput.type = 'text';
+    this.searchInput.placeholder = 'Search name, type, ID';
+    this.searchInput.setAttribute('data-testid', 'tree-search');
+    this.searchInput.setAttribute('aria-label', 'Search spatial tree');
+    this.searchInput.addEventListener('input', () => this.scheduleSearch());
+    this.searchInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.searchInput.value) {
+        this.clearSearch();
+        e.stopPropagation();
+      } else if (e.key === 'Enter' && this.firstMatch !== null) {
+        this.source.select(this.firstMatch);
+      }
+    });
+    this.searchCount = this.doc.createElement('span');
+    this.searchCount.className = 'ifc-search-count';
+    this.searchCount.setAttribute('data-testid', 'tree-search-count');
+    const clear = this.doc.createElement('button');
+    clear.className = 'ifc-search-clear';
+    clear.setAttribute('data-testid', 'tree-search-clear');
+    clear.title = 'Clear search';
+    clear.setAttribute('aria-label', 'Clear search');
+    clear.textContent = '×';
+    clear.addEventListener('click', () => this.clearSearch());
+    search.append(this.searchInput, this.searchCount, clear);
+    this.root.appendChild(search);
 
     this.body = this.doc.createElement('div');
     this.body.className = 'ifc-panel__body';
@@ -81,6 +168,7 @@ export class TreePanel {
     this.entries.clear();
     this.parents.clear();
     this.selected = null;
+    this.resetSearchState();
 
     const tree = this.source.getSpatialTree();
     if (!tree) {
@@ -155,7 +243,7 @@ export class TreePanel {
     childrenWrap.style.display = 'none';
     wrap.appendChild(childrenWrap);
 
-    const entry: NodeEntry = { node, row, childrenWrap, toggle, built: false, expanded: false };
+    const entry: NodeEntry = { node, wrap, row, childrenWrap, toggle, built: false, expanded: false };
     this.entries.set(node.expressID, entry);
 
     if (hasChildren && depth < AUTO_EXPAND_DEPTH) {
@@ -206,6 +294,86 @@ export class TreePanel {
     else this.expand(expressID);
   }
 
+  // -- search --------------------------------------------------------------
+
+  private scheduleSearch(): void {
+    if (this.searchTimer !== null) window.clearTimeout(this.searchTimer);
+    this.searchTimer = window.setTimeout(() => {
+      this.searchTimer = null;
+      this.runSearch(this.searchInput.value);
+    }, SEARCH_DEBOUNCE_MS);
+  }
+
+  private clearSearch(): void {
+    this.searchInput.value = '';
+    if (this.searchTimer !== null) {
+      window.clearTimeout(this.searchTimer);
+      this.searchTimer = null;
+    }
+    this.runSearch('');
+  }
+
+  /** Drop all search marks and leave search mode (expansions are kept). */
+  private unmarkSearch(): void {
+    for (const id of this.searchShown) {
+      this.entries.get(id)?.wrap.classList.remove('ifc-tree-show');
+    }
+    for (const id of this.searchMatched) {
+      this.entries.get(id)?.row.classList.remove('ifc-tree-row--match');
+    }
+    this.searchShown = [];
+    this.searchMatched = [];
+    this.firstMatch = null;
+    this.body.classList.remove('ifc-tree--searching');
+  }
+
+  private resetSearchState(): void {
+    this.unmarkSearch();
+    this.searchInput.value = '';
+    this.searchCount.textContent = '';
+  }
+
+  private runSearch(query: string): void {
+    this.unmarkSearch();
+    const trimmed = query.trim();
+    if (!trimmed) {
+      this.searchCount.textContent = '';
+      return;
+    }
+
+    const index = this.source.getSearchIndex();
+    const matches = index ? queryIndex(index, trimmed) : [];
+    this.firstMatch = matches.length > 0 ? matches[0].expressID : null;
+    const revealed = matches.slice(0, SEARCH_REVEAL_CAP);
+
+    const shown = new Set<number>();
+    for (const match of revealed) {
+      // Ancestors first, so the match's row exists (lazy DOM) and is open.
+      for (const ancestor of match.ancestors) {
+        this.expand(ancestor);
+        shown.add(ancestor);
+      }
+      shown.add(match.expressID);
+      const entry = this.entries.get(match.expressID);
+      if (entry) {
+        entry.row.classList.add('ifc-tree-row--match');
+        this.searchMatched.push(match.expressID);
+      }
+    }
+    for (const id of shown) {
+      const entry = this.entries.get(id);
+      if (entry) {
+        entry.wrap.classList.add('ifc-tree-show');
+        this.searchShown.push(id);
+      }
+    }
+
+    this.body.classList.add('ifc-tree--searching');
+    const suffix = matches.length > revealed.length ? `, first ${revealed.length} shown` : '';
+    this.searchCount.textContent =
+      matches.length === 1 ? '1 match' : `${matches.length} matches${suffix}`;
+  }
+
   /**
    * Scroll the selected row back into view. The viewer calls this when the
    * panel becomes visible again, since a hidden panel loses its scroll offset.
@@ -241,8 +409,10 @@ export class TreePanel {
   }
 
   dispose(): void {
+    if (this.searchTimer !== null) window.clearTimeout(this.searchTimer);
     this.unsubSelection();
     this.unsubLoaded();
+    this.railBtn.remove();
     this.root.remove();
   }
 }

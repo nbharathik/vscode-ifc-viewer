@@ -19,7 +19,9 @@
   "activationEvents": [
     "onCustomEditor:vscodeIfcViewer.editor",
     "onCommand:vscodeIfcViewer.resetView",
-    "onCommand:vscodeIfcViewer.showStatistics"
+    "onCommand:vscodeIfcViewer.showStatistics",
+    "onCommand:vscodeIfcViewer.toggleTree",
+    "onCommand:vscodeIfcViewer.toggleProperties"
   ],
   "contributes": {
     "customEditors": [
@@ -43,6 +45,16 @@
       {
         "command": "vscodeIfcViewer.showStatistics",
         "title": "Show Statistics",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.toggleTree",
+        "title": "Toggle Spatial Tree",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.toggleProperties",
+        "title": "Toggle Properties Panel",
         "category": "IFC Viewer"
       }
     ]

@@ -24,6 +24,11 @@ describe('vscode-ifc-viewer extension host', () => {
     const commands = await vscode.commands.getCommands(true);
     assert.ok(commands.includes('vscodeIfcViewer.resetView'), 'resetView command registered');
     assert.ok(commands.includes('vscodeIfcViewer.showStatistics'), 'showStatistics command registered');
+    assert.ok(commands.includes('vscodeIfcViewer.toggleTree'), 'toggleTree command registered');
+    assert.ok(
+      commands.includes('vscodeIfcViewer.toggleProperties'),
+      'toggleProperties command registered',
+    );
   });
 
   it('opens small.ifc in the custom editor and round-trips model-loaded', async function () {
