@@ -1,6 +1,6 @@
 {
   "name": "vscode-ifc-viewer-monorepo",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "private": true,
   "type": "module",
   "description": "Monorepo for vscode-ifc-viewer: a 3D IFC viewer custom editor for VS Code.",
