@@ -96,10 +96,12 @@ export class ViewerControls {
 
     this.orbit = new OrbitControls(scene.camera, dom);
     this.orbit.enableDamping = false; // deterministic: settle immediately
+    this.scene.setCameraTarget(this.orbit.target);
     this.orbit.addEventListener('start', () => {
       this.interacting = true;
     });
     this.orbit.addEventListener('change', () => {
+      this.scene.setCameraTarget(this.orbit.target);
       this.requestRender();
       this.adaptResolution();
     });
@@ -255,15 +257,10 @@ export class ViewerControls {
     margin = 1.15,
   ): CameraPose {
     const pose = framePose(center, radius, dir, this.scene.perspectiveCamera.fov, margin);
-    this.applyNearFar(radius);
     // Ortho framing: setPose derives the frustum height from the distance.
     if (this.scene.getProjection() === 'orthographic') pose.zoom = 1;
     this.setPose(pose);
     return pose;
-  }
-
-  private applyNearFar(radius: number): void {
-    this.scene.setNearFar(Math.max(radius / 1000, 0.001), Math.max(radius * 1000, 100));
   }
 
   /**

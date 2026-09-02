@@ -34,6 +34,13 @@ export interface ScenePick {
 
 const DEFAULT_COLORS: SceneColors = { background: 0x1e1e1e };
 
+/** Smallest useful near plane, in the model's world units. */
+const MIN_NEAR = 0.001;
+/** Do not let an interior view's near plane grow beyond this value. */
+const MAX_INTERIOR_NEAR = 0.1;
+/** Extra room around the model sphere so geometry never touches a clip plane. */
+const CLIP_PADDING = 1.05;
+
 export class SceneController {
   readonly scene: THREE.Scene;
   readonly renderer: THREE.WebGLRenderer;
@@ -54,6 +61,8 @@ export class SceneController {
   private baseHeight = 1;
   /** World-space half height of the orthographic frustum at zoom 1. */
   private orthoHalfHeight = 10;
+  /** Orbit focus used to choose a navigation-scale near plane inside a model. */
+  private readonly cameraTarget = new THREE.Vector3();
   /** Drawing-buffer scale in (0, 1]; lowered during interaction on slow scenes. */
   private resolutionScale = 1;
 
@@ -122,12 +131,75 @@ export class SceneController {
 
   /** Keep both cameras' clip range in sync so projection switches are seamless. */
   setNearFar(near: number, far: number): void {
+    if (
+      Math.abs(this.activeCamera.near - near) <= Math.max(near * 1e-6, 1e-9) &&
+      Math.abs(this.activeCamera.far - far) <= Math.max(far * 1e-6, 1e-9)
+    ) {
+      return;
+    }
     this.perspectiveCamera.near = near;
     this.perspectiveCamera.far = far;
     this.perspectiveCamera.updateProjectionMatrix();
     this.orthographicCamera.near = near;
     this.orthographicCamera.far = far;
     this.orthographicCamera.updateProjectionMatrix();
+  }
+
+  /** Keep the latest OrbitControls focus available to the render path. */
+  setCameraTarget(target: THREE.Vector3): void {
+    this.cameraTarget.copy(target);
+  }
+
+  /**
+   * Fit the depth range to the current model and camera before drawing.
+   *
+   * The old radius / 1000 to radius * 1000 range always had a 1,000,000:1
+   * ratio. A 24-bit perspective depth buffer then loses millimetres of
+   * precision at normal building-view distances, allowing adjacent IFC faces
+   * to exchange depth order while orbiting. This range encloses the same model
+   * sphere but keeps the near plane as far forward as navigation permits.
+   */
+  private updateCameraClipRange(): void {
+    const bounds = this.batcher.getBounds();
+    const sx = bounds.max.x - bounds.min.x;
+    const sy = bounds.max.y - bounds.min.y;
+    const sz = bounds.max.z - bounds.min.z;
+    const radius = Math.hypot(sx, sy, sz) * 0.5;
+    if (!(radius > 0) || !Number.isFinite(radius)) return;
+
+    const cx = (bounds.min.x + bounds.max.x) * 0.5;
+    const cy = (bounds.min.y + bounds.max.y) * 0.5;
+    const cz = (bounds.min.z + bounds.max.z) * 0.5;
+    const camera = this.activeCamera.position;
+    let fx = this.cameraTarget.x - camera.x;
+    let fy = this.cameraTarget.y - camera.y;
+    let fz = this.cameraTarget.z - camera.z;
+    const focusDistance = Math.hypot(fx, fy, fz);
+    if (focusDistance > 1e-9) {
+      fx /= focusDistance;
+      fy /= focusDistance;
+      fz /= focusDistance;
+    } else {
+      // Degenerate saved poses are tolerated elsewhere, so retain the
+      // camera's current direction if position and target happen to coincide.
+      const direction = this.activeCamera.getWorldDirection(new THREE.Vector3());
+      fx = direction.x;
+      fy = direction.y;
+      fz = direction.z;
+    }
+    const centerDepth =
+      (cx - camera.x) * fx + (cy - camera.y) * fy + (cz - camera.z) * fz;
+
+    // Outside the model, the sphere's front edge gives a tight near plane.
+    // Inside it, use the current navigation scale and retain close-up access.
+    const interiorNear = Math.min(
+      MAX_INTERIOR_NEAR,
+      Math.max(MIN_NEAR, focusDistance / 1000),
+    );
+    const paddedRadius = radius * CLIP_PADDING;
+    const near = Math.max(interiorNear, centerDepth - paddedRadius);
+    const far = Math.max(near + MIN_NEAR, centerDepth + paddedRadius);
+    this.setNearFar(near, far);
   }
 
   // -- section plane -------------------------------------------------------
@@ -260,6 +332,7 @@ export class SceneController {
    * point is the ray hit on the element's AABB.
    */
   pick(canvasX: number, canvasY: number): ScenePick | null {
+    this.updateCameraClipRange();
     const size = this.renderer.getSize(new THREE.Vector2());
     const w = size.x;
     const h = size.y;
@@ -349,6 +422,7 @@ export class SceneController {
 
   render(): void {
     const t0 = performance.now();
+    this.updateCameraClipRange();
     this.renderer.render(this.scene, this.camera);
     this.lastRenderMs = performance.now() - t0;
     this.renderTimestamps.push(t0);

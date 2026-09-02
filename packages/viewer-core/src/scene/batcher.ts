@@ -201,6 +201,11 @@ export class ModelBatcher {
       side: THREE.DoubleSide,
       vertexColors,
       transparent,
+      // Strict comparison makes coincident opaque IFC faces deterministic.
+      // LessEqual lets a later equal-depth face overwrite the first one,
+      // which presents as z-fighting while the camera rotates. Transparent
+      // geometry retains normal blending semantics and camera-depth sorting.
+      depthFunc: transparent ? THREE.LessEqualDepth : THREE.LessDepth,
     });
     const stateTexUniform = this.stateTexUniform;
     const stateSizeUniform = this.stateSizeUniform;
@@ -237,6 +242,8 @@ export class ModelBatcher {
   private makePickMaterial(): THREE.ShaderMaterial {
     return new THREE.ShaderMaterial({
       side: THREE.DoubleSide,
+      // Match the visible opaque pass for coincident elements.
+      depthFunc: THREE.LessDepth,
       clipping: true,
       uniforms: {
         uStateTex: this.stateTexUniform,
