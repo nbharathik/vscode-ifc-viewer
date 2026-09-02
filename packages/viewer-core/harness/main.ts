@@ -103,6 +103,10 @@ const hooks: HarnessHooks = {
   getViewport: () => viewer.getViewport(),
   fitToModel: () => viewer.fitToModel(),
   fitToElement: (expressID) => viewer.fitToElement(expressID),
+  fitToSelection: () => viewer.fitToSelection(),
+  setStandardView: (view) => viewer.setStandardView(view),
+  getProjection: () => viewer.getProjection(),
+  setProjection: (mode) => viewer.setProjection(mode),
   pickAt: (x, y) => viewer.pickAt(x, y),
   getSceneInfo: () => viewer.getSceneInfo(),
   getSpatialTree: () => viewer.getSpatialTree(),
@@ -117,12 +121,34 @@ const hooks: HarnessHooks = {
   setCategoryVisible: (category, visible) => viewer.setCategoryVisible(category, visible),
   isCategoryVisible: (category) => viewer.isCategoryVisible(category),
   showStatistics: () => viewer.showStatistics(),
+  setTreeVisible: (visible) => viewer.setTreeVisible(visible),
+  isTreeVisible: () => viewer.isTreeVisible(),
+  setPropertiesVisible: (visible) => viewer.setPropertiesVisible(visible),
+  arePropertiesVisible: () => viewer.arePropertiesVisible(),
+  setPanelsVisible: (visible) => viewer.setPanelsVisible(visible),
+  arePanelsVisible: () => viewer.arePanelsVisible(),
+  togglePanels: () => viewer.togglePanels(),
+  getSectionState: () => viewer.getSectionState(),
+  setSectionEnabled: (enabled) => viewer.setSectionEnabled(enabled),
+  setSectionAxis: (axis) => viewer.setSectionAxis(axis),
+  setSectionPosition: (position) => viewer.setSectionPosition(position),
+  setSectionFlipped: (flipped) => viewer.setSectionFlipped(flipped),
+  resetSection: () => viewer.resetSection(),
+  getFilterOptions: () => viewer.getFilterOptions(),
+  getTypeFilter: () => viewer.getTypeFilter(),
+  setTypeFilter: (types) => viewer.setTypeFilter(types),
+  getStoreyFilter: () => viewer.getStoreyFilter(),
+  setStoreyFilter: (storeys) => viewer.setStoreyFilter(storeys),
+  resetFilters: () => viewer.resetFilters(),
+  getViewState: () => viewer.getViewState(),
+  applyViewState: (state) => viewer.applyViewState(state),
   setTheme: (kind) => setTheme(kind),
   getProgressLog: () => progressLog,
   getRendererInfo: () => viewer.getRendererInfo(),
   dispose: () => viewer.dispose(),
   getProperties: (expressID) => viewer.getProperties(expressID),
   isReady: () => viewer.isReady(),
+  render: () => viewer.render(),
   setPerfHud: () => viewer.togglePerfHud(),
   getLoadTimeline: () => viewer.getLoadTimeline(),
   cancelLoad: () => viewer.cancelLoad(),
@@ -167,8 +193,10 @@ function mountDevBar(): void {
   const style = document.createElement('style');
   style.textContent = `
     #devbar {
-      position: absolute; top: 8px; left: 296px; z-index: 30;
-      display: flex; flex-direction: column; align-items: flex-start; gap: 6px;
+      /* Right of center so it never collides with the viewer toolbar (top
+         left) or the properties panel (right edge). */
+      position: absolute; top: 8px; right: 296px; z-index: 30;
+      display: flex; flex-direction: column; align-items: flex-end; gap: 6px;
       font-family: system-ui, sans-serif; font-size: 11px;
       color: var(--vscode-editor-foreground, #ccc);
     }

@@ -164,6 +164,11 @@ export class ModelBatcher {
 
   private highlighted: number | null = null;
   private hiddenSet = new Set<number>();
+  /** Type/storey filter allowlist; null = no filter active. Kept separate from
+   * hiddenSet so clearing filters preserves manual hiding and vice versa. */
+  private filterSet: Set<number> | null = null;
+  /** Shared section clipping planes, applied to every model material. */
+  private clippingPlanes: THREE.Plane[] | null = null;
   private categoryVisible: Record<string, boolean> = {
     IfcSpace: false,
     IfcOpeningElement: false,
@@ -221,12 +226,18 @@ export class ModelBatcher {
         );
     };
     material.customProgramCacheKey = () => `ifc-batch-${transparent}-${vertexColors}`;
+    material.clippingPlanes = this.clippingPlanes;
     return material;
   }
 
+  /**
+   * Pick shader includes the clipping chunks so a section plane hides
+   * elements from picking exactly as it hides them from view.
+   */
   private makePickMaterial(): THREE.ShaderMaterial {
     return new THREE.ShaderMaterial({
       side: THREE.DoubleSide,
+      clipping: true,
       uniforms: {
         uStateTex: this.stateTexUniform,
         uStateSize: this.stateSizeUniform,
@@ -235,17 +246,21 @@ export class ModelBatcher {
         attribute float aElementIndex;
         varying float vElementIndex;
         #include <common>
+        #include <clipping_planes_pars_vertex>
         void main() {
           vElementIndex = aElementIndex;
           #include <begin_vertex>
           #include <project_vertex>
+          #include <clipping_planes_vertex>
         }
       `,
       fragmentShader: `
+        #include <clipping_planes_pars_fragment>
         uniform sampler2D uStateTex;
         uniform vec2 uStateSize;
         varying float vElementIndex;
         void main() {
+          #include <clipping_planes_fragment>
           vec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;
           if (texture2D(uStateTex, stUv).r < 0.5) discard;
           float id = vElementIndex + 1.0;
@@ -694,7 +709,8 @@ export class ModelBatcher {
   private isVisible(record: ElementRecord, expressID: number): boolean {
     const categoryOK =
       record.ifcType in this.categoryVisible ? this.categoryVisible[record.ifcType] : true;
-    return categoryOK && !this.hiddenSet.has(expressID);
+    const filterOK = this.filterSet === null || this.filterSet.has(expressID);
+    return categoryOK && filterOK && !this.hiddenSet.has(expressID);
   }
 
   private writeState(record: ElementRecord): void {
@@ -725,6 +741,37 @@ export class ModelBatcher {
   showAll(): void {
     this.hiddenSet.clear();
     this.rewriteAllStates();
+  }
+
+  /** Apply (or clear) the type/storey filter allowlist. State-texture only. */
+  setFilter(ids: Set<number> | null): void {
+    this.filterSet = ids;
+    this.rewriteAllStates();
+  }
+
+  getFilter(): Set<number> | null {
+    return this.filterSet;
+  }
+
+  /**
+   * Attach (or detach) the shared section planes to every model material,
+   * including the pick material. Detached planes cost nothing per frame;
+   * moving an attached plane is a uniform update, never a rebuild.
+   */
+  setClippingPlanes(planes: THREE.Plane[] | null): void {
+    if (planes === this.clippingPlanes) return;
+    this.clippingPlanes = planes;
+    const materials: THREE.Material[] = [
+      this.mergedOpaque,
+      this.mergedTransparent,
+      this.instOpaque,
+      ...this.instTransparentByAlpha.values(),
+      this.pickMaterial,
+    ];
+    for (const material of materials) {
+      material.clippingPlanes = planes;
+      material.needsUpdate = true;
+    }
   }
 
   setCategoryVisible(type: string, visible: boolean): void {
@@ -792,6 +839,17 @@ export class ModelBatcher {
       if (record.ifcType === type) return true;
     }
     return false;
+  }
+
+  /** Element types present in the scene with element counts, sorted by name. */
+  typesWithCounts(): { type: string; count: number }[] {
+    const counts = new Map<string, number>();
+    for (const record of this.elements.values()) {
+      counts.set(record.ifcType, (counts.get(record.ifcType) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => a.type.localeCompare(b.type));
   }
 
   allExpressIDs(): number[] {

@@ -3,7 +3,11 @@
 // the webview safely.
 
 export type ThemeKind = 'light' | 'dark';
-export type ViewerCommand = 'resetView' | 'showStatistics';
+export type ViewerCommand =
+  | 'resetView'
+  | 'showStatistics'
+  | 'toggleTree'
+  | 'toggleProperties';
 
 /** Messages sent host -> webview. */
 export type HostToWebview =

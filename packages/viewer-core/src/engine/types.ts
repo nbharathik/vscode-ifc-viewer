@@ -49,6 +49,8 @@ export interface SpatialNode {
   /** IFC class name, e.g. "IfcBuildingStorey". */
   type: string;
   name: string | null;
+  /** IfcRoot GlobalId, when present (used by tree search). */
+  globalId?: string | null;
   children: SpatialNode[];
 }
 

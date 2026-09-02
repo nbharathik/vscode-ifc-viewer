@@ -3,12 +3,19 @@
 // may import @vscode-ifc-viewer/core (which brings Three.js + web-ifc) but never
 // imports `three`/`web-ifc` directly - the layer ban only forbids direct imports.
 import { createViewer, CancelledError } from '@vscode-ifc-viewer/core';
+import type { ViewerViewState } from '@vscode-ifc-viewer/core';
 import type { HostToWebview, WebviewToHost } from '../protocol.js';
 
 interface VsCodeApi {
   postMessage(message: WebviewToHost): void;
   setState(state: unknown): void;
   getState(): unknown;
+}
+
+/** Webview state persisted through VS Code across tab hide/restore/reload. */
+interface PersistedState {
+  fileName: string;
+  view: ViewerViewState;
 }
 declare function acquireVsCodeApi(): VsCodeApi;
 declare global {
@@ -60,6 +67,39 @@ interface LoadRequest {
   isUrl: boolean;
 }
 
+// -- view-state persistence -------------------------------------------------
+// VS Code can rebuild a hidden webview from scratch; getState/setState keeps
+// the working camera, panel, section and filter state across that.
+let currentFileName: string | null = null;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function readPersisted(): PersistedState | null {
+  const raw = vscode.getState();
+  if (!raw || typeof raw !== 'object') return null;
+  const state = raw as Partial<PersistedState>;
+  return typeof state.fileName === 'string' && state.view ? (state as PersistedState) : null;
+}
+
+function saveViewState(): void {
+  if (!currentFileName || !viewer.isReady()) return;
+  vscode.setState({ fileName: currentFileName, view: viewer.getViewState() } satisfies PersistedState);
+}
+
+viewer.onViewChanged(() => {
+  if (saveTimer !== null) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveViewState();
+  }, 250);
+});
+
+function restoreViewState(fileName: string): void {
+  const persisted = readPersisted();
+  if (persisted && persisted.fileName === fileName) {
+    viewer.applyViewState(persisted.view);
+  }
+}
+
 async function runLoad({ source, fileName, isUrl }: LoadRequest): Promise<void> {
   try {
     const model = await viewer.load(source, {
@@ -74,6 +114,8 @@ async function runLoad({ source, fileName, isUrl }: LoadRequest): Promise<void> 
           bytesTotal: p.bytesTotal,
         }),
     });
+    currentFileName = fileName;
+    restoreViewState(fileName);
     post({
       type: 'loaded',
       stats: {
@@ -123,6 +165,8 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
     case 'command':
       if (msg.command === 'resetView') viewer.fitToModel();
       else if (msg.command === 'showStatistics') viewer.showStatistics();
+      else if (msg.command === 'toggleTree') viewer.toggleTree();
+      else if (msg.command === 'toggleProperties') viewer.toggleProperties();
       break;
     case 'theme':
       // VS Code updates its CSS variables live; re-read them into the viewport.

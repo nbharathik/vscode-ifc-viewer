@@ -66,8 +66,8 @@ export default tseslint.config(
     },
   },
   {
-    // bench.mjs evaluates snippets inside the harness page via Playwright.
-    files: ['scripts/bench.mjs'],
+    // These scripts evaluate snippets inside the harness page via Playwright.
+    files: ['scripts/bench.mjs', 'scripts/capture-readme.mjs'],
     languageOptions: {
       globals: {
         window: 'readonly',

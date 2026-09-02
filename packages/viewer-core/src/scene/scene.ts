@@ -8,7 +8,13 @@ import type { IfcMesh, ModelBounds } from '../engine/types.js';
 export interface CameraPose {
   position: [number, number, number];
   target: [number, number, number];
+  /** Orthographic zoom factor; omitted or 1 for perspective poses. */
+  zoom?: number;
 }
+
+export type ProjectionMode = 'perspective' | 'orthographic';
+
+export type SectionAxis = 'x' | 'y' | 'z';
 
 export interface SceneInfo {
   meshCount: number;
@@ -30,16 +36,24 @@ const DEFAULT_COLORS: SceneColors = { background: 0x1e1e1e };
 
 export class SceneController {
   readonly scene: THREE.Scene;
-  readonly camera: THREE.PerspectiveCamera;
   readonly renderer: THREE.WebGLRenderer;
+  /** Perspective camera; also the source of pose state when switching modes. */
+  readonly perspectiveCamera: THREE.PerspectiveCamera;
+  /** Orthographic sibling; frustum derived from orthoHalfHeight and aspect. */
+  readonly orthographicCamera: THREE.OrthographicCamera;
+  private activeCamera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   private batcher: ModelBatcher;
   private colors: SceneColors;
   private readonly pickTarget: THREE.WebGLRenderTarget;
+  /** Single shared section plane; null while sectioning is disabled. */
+  private sectionPlane: THREE.Plane | null = null;
   private lastRenderMs = 0;
   private renderTimestamps: number[] = [];
   /** CSS-pixel viewport size; the drawing buffer is this times the scale. */
   private baseWidth = 1;
   private baseHeight = 1;
+  /** World-space half height of the orthographic frustum at zoom 1. */
+  private orthoHalfHeight = 10;
   /** Drawing-buffer scale in (0, 1]; lowered during interaction on slow scenes. */
   private resolutionScale = 1;
 
@@ -57,9 +71,12 @@ export class SceneController {
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(colors.background);
 
-    this.camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
-    this.camera.position.set(10, 10, 10);
-    this.camera.lookAt(0, 0, 0);
+    this.perspectiveCamera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
+    this.perspectiveCamera.position.set(10, 10, 10);
+    this.perspectiveCamera.lookAt(0, 0, 0);
+    this.orthographicCamera = new THREE.OrthographicCamera(-10, 10, 10, -10, 0.01, 1000);
+    this.orthographicCamera.position.copy(this.perspectiveCamera.position);
+    this.activeCamera = this.perspectiveCamera;
 
     const hemi = new THREE.HemisphereLight(0xffffff, 0x444444, 1.1);
     hemi.position.set(0, 1, 0);
@@ -77,9 +94,84 @@ export class SceneController {
     this.pickTarget = new THREE.WebGLRenderTarget(1, 1);
   }
 
+  /** The camera in use (perspective by default). */
+  get camera(): THREE.PerspectiveCamera | THREE.OrthographicCamera {
+    return this.activeCamera;
+  }
+
+  getProjection(): ProjectionMode {
+    return this.activeCamera === this.perspectiveCamera ? 'perspective' : 'orthographic';
+  }
+
+  /** Swap the active camera. Pose math is the caller's job (see controls). */
+  setProjection(mode: ProjectionMode): void {
+    this.activeCamera =
+      mode === 'orthographic' ? this.orthographicCamera : this.perspectiveCamera;
+    this.applySize();
+  }
+
+  /** Resize the orthographic frustum (world units, half of the visible height). */
+  setOrthoHalfHeight(halfHeight: number): void {
+    this.orthoHalfHeight = Math.max(halfHeight, 1e-6);
+    this.applySize();
+  }
+
+  getOrthoHalfHeight(): number {
+    return this.orthoHalfHeight;
+  }
+
+  /** Keep both cameras' clip range in sync so projection switches are seamless. */
+  setNearFar(near: number, far: number): void {
+    this.perspectiveCamera.near = near;
+    this.perspectiveCamera.far = far;
+    this.perspectiveCamera.updateProjectionMatrix();
+    this.orthographicCamera.near = near;
+    this.orthographicCamera.far = far;
+    this.orthographicCamera.updateProjectionMatrix();
+  }
+
+  // -- section plane -------------------------------------------------------
+  /**
+   * Enable or move the single section plane. Creating the plane switches on
+   * local clipping and attaches it to the model materials once; subsequent
+   * calls only mutate the plane, which the renderer uploads as a uniform.
+   */
+  setSectionPlane(normal: [number, number, number], constant: number): void {
+    if (!this.sectionPlane) {
+      this.sectionPlane = new THREE.Plane(new THREE.Vector3(...normal), constant);
+      this.renderer.localClippingEnabled = true;
+      this.batcher.setClippingPlanes([this.sectionPlane]);
+    } else {
+      this.sectionPlane.normal.set(...normal);
+      this.sectionPlane.constant = constant;
+    }
+  }
+
+  /** Detach the section plane; clipping goes back to costing nothing. */
+  clearSectionPlane(): void {
+    if (!this.sectionPlane) return;
+    this.sectionPlane = null;
+    this.renderer.localClippingEnabled = false;
+    this.batcher.setClippingPlanes(null);
+  }
+
+  hasSectionPlane(): boolean {
+    return this.sectionPlane !== null;
+  }
+
   /** Feed a batch of engine meshes into the GPU batcher. */
   addMeshes(meshes: IfcMesh[]): void {
     this.batcher.ingest(meshes);
+  }
+
+  /** Apply (or clear) the type/storey filter allowlist. */
+  setFilter(ids: Set<number> | null): void {
+    this.batcher.setFilter(ids);
+  }
+
+  /** Element types present in the scene, for the filter flyout. */
+  typesWithCounts(): { type: string; count: number }[] {
+    return this.batcher.typesWithCounts();
   }
 
   // -- visibility ---------------------------------------------------------
@@ -141,7 +233,7 @@ export class SceneController {
 
   getViewport(): { width: number; height: number; aspect: number } {
     const size = this.renderer.getSize(new THREE.Vector2());
-    return { width: size.x, height: size.y, aspect: this.camera.aspect };
+    return { width: size.x, height: size.y, aspect: this.baseWidth / this.baseHeight };
   }
 
   /** Live GPU resource counts (for leak detection and the perf HUD). */
@@ -223,8 +315,15 @@ export class SceneController {
     const w = Math.max(1, Math.floor(this.baseWidth * this.resolutionScale));
     const h = Math.max(1, Math.floor(this.baseHeight * this.resolutionScale));
     this.renderer.setSize(w, h, false);
-    this.camera.aspect = this.baseWidth / this.baseHeight;
-    this.camera.updateProjectionMatrix();
+    const aspect = this.baseWidth / this.baseHeight;
+    this.perspectiveCamera.aspect = aspect;
+    this.perspectiveCamera.updateProjectionMatrix();
+    const halfH = this.orthoHalfHeight;
+    this.orthographicCamera.left = -halfH * aspect;
+    this.orthographicCamera.right = halfH * aspect;
+    this.orthographicCamera.top = halfH;
+    this.orthographicCamera.bottom = -halfH;
+    this.orthographicCamera.updateProjectionMatrix();
   }
 
   /**
@@ -293,9 +392,13 @@ export class SceneController {
     this.batcher.dispose();
     this.batcher = new ModelBatcher();
     this.scene.add(this.batcher.group);
+    // A live section plane survives the batcher swap (model replacement is
+    // driven by the viewer, which resets sectioning before a new load).
+    if (this.sectionPlane) this.batcher.setClippingPlanes([this.sectionPlane]);
   }
 
   dispose(): void {
+    this.clearSectionPlane();
     this.scene.remove(this.batcher.group);
     this.batcher.dispose();
     this.pickTarget.dispose();

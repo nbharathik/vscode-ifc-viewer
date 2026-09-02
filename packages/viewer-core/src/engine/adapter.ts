@@ -420,6 +420,7 @@ export class WebIfcAdapter implements IfcEngine {
         expressID: id,
         type: this.typeName(modelID, id),
         name: asString(unwrap(line.Name)),
+        globalId: asString(unwrap(line.GlobalId)),
         children,
       };
     };
