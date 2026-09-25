@@ -28,8 +28,6 @@ Open any `.ifc` file and the viewer starts automatically.
 
 ## Pair with an AI agent
 
-![Highlight groups sent by an agent, with the legend](https://raw.githubusercontent.com/nbharathik/vscode-ifc-viewer/main/docs/images/agent.png)
-
 1. Open an `.ifc` file from a folder in your workspace.
 2. Click **Connect to agent** (the plug icon at the end of the toolbar).
 3. Ask your agent, for example Claude Code with IFC Skills, about the model.
