@@ -55,10 +55,6 @@ Requires VS Code 1.96 or later.
 
 ## Pair with an AI agent
 
-<p align="center">
-  <img src="docs/images/agent.png" width="90%" alt="Highlight groups sent by an agent, listed in the legend" />
-</p>
-
 Click **Connect to agent** (the plug icon in the viewer toolbar), then ask
 your agent about the model. Its answers appear as colour-coded highlight
 groups with a legend, and edits to the file reload automatically. Nothing is
