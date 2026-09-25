@@ -5,6 +5,6 @@
     "types": [],
     "noEmit": true
   },
-  "include": ["src/webview/**/*.ts", "src/protocol.ts"],
+  "include": ["src/webview/**/*.ts", "src/protocol.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

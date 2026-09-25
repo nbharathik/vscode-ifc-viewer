@@ -28,3 +28,4 @@ bench-results.json
 dev/
 tests/
 CLAUDE.md
+.ifc-skills/

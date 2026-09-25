@@ -36,6 +36,13 @@ This is an npm-workspaces monorepo with two packages:
 All IFC access goes through a single engine adapter in
 `packages/viewer-core/src/engine/`, the only place `web-ifc` is imported.
 
+The optional agent bridge lives in `packages/extension/src/` (`bridge.ts`,
+`bridgeProtocol.ts`, `autoReload.ts`, `settings.ts`) and the webview's
+`bridgeOps.ts`. It is opt-in per folder and must stay read-only: commands may
+never write IFC files, run code, or use the network. The file protocol is
+documented in [docs/agent-bridge.md](docs/agent-bridge.md); keep it in sync
+with `bridgeProtocol.ts`.
+
 ## The test gate
 
 Every change must keep the following green before it is committed:
@@ -80,6 +87,6 @@ request, and open an issue first for anything that needs new test coverage.
 
 ## Scope
 
-The viewer is deliberately read-only. Editing, measurements, clipping planes, and
+The viewer is deliberately read-only. Editing, measurements, section caps, and
 other larger features are out of scope for now. If you want to work on one of
 them, please open an issue first so we can agree on the approach.

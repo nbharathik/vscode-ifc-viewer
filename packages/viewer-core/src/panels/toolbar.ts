@@ -79,6 +79,22 @@ export interface ToolbarSource {
   resetFilters(): void;
 }
 
+/** A host-supplied toolbar button (for example the extension's agent toggle). */
+export interface ToolbarButtonSpec {
+  id: string;
+  label: string;
+  /** Trusted inline SVG markup, drawn with currentColor. */
+  icon: string;
+  onClick: () => void;
+}
+
+export interface ToolbarButtonHandle {
+  setLabel(label: string): void;
+  setActive(active: boolean): void;
+  setDisabled(disabled: boolean): void;
+  remove(): void;
+}
+
 interface FlyoutEntry {
   button: HTMLButtonElement;
   wrap: HTMLElement;
@@ -246,6 +262,27 @@ export class Toolbar {
   }
 
   // -- controls ------------------------------------------------------------
+
+  /** Append a host-supplied icon button after the built-in tools. */
+  addButton(spec: ToolbarButtonSpec): ToolbarButtonHandle {
+    const btn = this.iconButton(spec.id, spec.label, spec.icon);
+    btn.addEventListener('click', () => {
+      this.closeFlyouts();
+      spec.onClick();
+    });
+    this.root.appendChild(btn);
+    return {
+      setLabel: (label) => {
+        btn.title = label;
+        btn.setAttribute('aria-label', label);
+      },
+      setActive: (active) => btn.setAttribute('data-active', String(active)),
+      setDisabled: (disabled) => {
+        btn.disabled = disabled;
+      },
+      remove: () => btn.remove(),
+    };
+  }
 
   private buildFitButton(): void {
     const fit = this.iconButton('btn-fit', 'Fit model', FIT_ICON);

@@ -1,6 +1,6 @@
 {
   "name": "@vscode-ifc-viewer/core",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Framework-agnostic IFC viewer: web-ifc parsing + Three.js rendering + plain-DOM panels.",
   "license": "MIT",

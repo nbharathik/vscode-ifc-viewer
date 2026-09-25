@@ -9,6 +9,7 @@ export default defineConfig({
     include: [
       'tests/**/*.test.ts',
       'packages/viewer-core/tests/**/*.test.ts',
+      'packages/extension/tests/**/*.test.ts',
     ],
     exclude: ['**/node_modules/**', '**/dist/**', '**/*.spec.ts'],
     testTimeout: 30000,

@@ -2,6 +2,7 @@
 // Playwright specs drive the viewer exclusively through this surface so the
 // browser/Node split stays clean.
 import type {
+  GlobalIdResolution,
   ModelStats,
   SpatialNode,
   ItemProperties,
@@ -111,6 +112,22 @@ export interface HarnessHooks {
   /** Tear down the viewer (free GPU + DOM). */
   dispose(): void;
   getProperties(expressID: number): Promise<ItemProperties | null>;
+  /** GlobalId <-> expressID lookups against the loaded model. */
+  resolveGlobalIds(globalIds: string[]): Promise<GlobalIdResolution>;
+  globalIdOf(expressID: number): Promise<string | null>;
+  /** Named colour groups. */
+  setHighlight(label: string, expressIDs: number[], color?: string): void;
+  clearHighlight(label?: string): void;
+  getHighlights(): { label: string; color: string; count: number }[];
+  /** onHighlightsChange events since the page loaded. */
+  getHighlightEvents(): number;
+  isolate(expressIDs: number[]): void;
+  isIsolated(): boolean;
+  fitTo(expressIDs: number[]): CameraPose | null;
+  setHighlightLegendEnabled(enabled: boolean): void;
+  /** Adds a host toolbar button (testid "btn-test"); clicks are counted. */
+  addTestToolbarButton(): void;
+  getTestToolbarClicks(): number;
   /** True once the most recent load has fully rendered a frame. */
   isReady(): boolean;
   /** Render one frame (perf measurements). */

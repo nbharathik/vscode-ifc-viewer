@@ -1,15 +1,15 @@
 {
   "name": "vscode-ifc-viewer",
   "displayName": "IFC Viewer",
-  "description": "Open and explore IFC (.ifc) building models in a real 3D viewer inside VS Code: orbit, spatial tree, selection, properties and psets.",
-  "version": "1.2.0",
+  "description": "Open and explore IFC (.ifc) building models in a real 3D viewer inside VS Code: orbit, spatial tree, selection, properties and psets. Pairs with AI agents such as Claude Code to highlight elements by GlobalId.",
+  "version": "1.4.0",
   "publisher": "BharathikannanN",
   "license": "MIT",
   "engines": {
     "vscode": "^1.96.0"
   },
   "categories": ["Visualization", "Other"],
-  "keywords": ["ifc", "bim", "3d", "viewer", "buildingSMART", "ifcopenshell"],
+  "keywords": ["ifc", "bim", "3d", "viewer", "buildingSMART", "ifcopenshell", "ai", "agent", "claude"],
   "icon": "media/icon.png",
   "repository": {
     "type": "git",
@@ -21,7 +21,8 @@
     "onCommand:vscodeIfcViewer.resetView",
     "onCommand:vscodeIfcViewer.showStatistics",
     "onCommand:vscodeIfcViewer.toggleTree",
-    "onCommand:vscodeIfcViewer.toggleProperties"
+    "onCommand:vscodeIfcViewer.toggleProperties",
+    "workspaceContains:.ifc-skills/viewer/state.json"
   ],
   "contributes": {
     "customEditors": [
@@ -56,8 +57,146 @@
         "command": "vscodeIfcViewer.toggleProperties",
         "title": "Toggle Properties Panel",
         "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.connectAgent",
+        "title": "Connect to Agent",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.disconnectAgent",
+        "title": "Disconnect from Agent",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.copySelectionGlobalId",
+        "title": "Copy Selection GlobalId",
+        "category": "IFC Viewer"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "IFC Viewer",
+      "properties": {
+        "ifcViewer.agentBridge.enabled": {
+          "type": "boolean",
+          "default": true,
+          "order": 0,
+          "markdownDescription": "Show the **Connect to agent** button and allow connecting an AI agent (for example Claude Code with IFC Skills). Nothing is written until you connect a folder; connecting writes `.ifc-skills/viewer/` in it. Turning this off stops every connection."
+        },
+        "ifcViewer.agentBridge.autoConnect": {
+          "type": "string",
+          "enum": ["never", "remember", "always"],
+          "enumDescriptions": [
+            "Every session starts disconnected; use the button or the Connect to Agent command.",
+            "Reconnect the folders you connected last time, and only those.",
+            "Connect a folder as soon as an IFC file in it opens."
+          ],
+          "default": "remember",
+          "order": 1,
+          "description": "When the viewer connects to an agent on its own."
+        },
+        "ifcViewer.agentBridge.heartbeatSeconds": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 2,
+          "maximum": 300,
+          "order": 2,
+          "markdownDescription": "How often `state.json` is refreshed (its `heartbeatAt`) and the inbox is re-scanned, in seconds."
+        },
+        "ifcViewer.agentBridge.selectionDebounceMs": {
+          "type": "integer",
+          "default": 150,
+          "minimum": 0,
+          "maximum": 5000,
+          "order": 3,
+          "markdownDescription": "Minimum time between `state.json` writes for selection and highlight changes, in milliseconds. The first change is written at once."
+        },
+        "ifcViewer.agentBridge.maxCommandAgeSeconds": {
+          "type": "integer",
+          "default": 60,
+          "minimum": 5,
+          "maximum": 3600,
+          "order": 4,
+          "markdownDescription": "Commands whose `createdAt` is older than this are rejected, in seconds."
+        },
+        "ifcViewer.agentBridge.maxIdsPerCommand": {
+          "type": "integer",
+          "default": 50000,
+          "minimum": 1,
+          "maximum": 1000000,
+          "order": 5,
+          "description": "Largest number of GlobalIds one command may carry."
+        },
+        "ifcViewer.agentBridge.commandTimeoutSeconds": {
+          "type": "integer",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 3600,
+          "order": 6,
+          "description": "How long a command may wait for a model to load or the viewer to answer before it fails, in seconds."
+        },
+        "ifcViewer.agentBridge.outboxRetentionMinutes": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 1440,
+          "order": 7,
+          "markdownDescription": "Answers in `outbox/` older than this are deleted, in minutes."
+        },
+        "ifcViewer.agentBridge.removeFolderOnDisconnect": {
+          "type": "boolean",
+          "default": true,
+          "order": 8,
+          "markdownDescription": "Delete `.ifc-skills/viewer/` when you disconnect (and `.ifc-skills/` when connecting created it and it is left empty). When off, `state.json` stays with `open: false`."
+        },
+        "ifcViewer.agentBridge.revealHiddenCategories": {
+          "type": "boolean",
+          "default": true,
+          "order": 9,
+          "description": "Show spaces or openings when an agent selects, highlights or isolates them (they are hidden by default)."
+        },
+        "ifcViewer.autoReload.mode": {
+          "type": "string",
+          "enum": ["off", "whenConnected", "always"],
+          "enumDescriptions": [
+            "Never reload on file changes.",
+            "Reload models in folders connected to an agent.",
+            "Reload every open model when its file changes."
+          ],
+          "default": "whenConnected",
+          "order": 10,
+          "description": "Reload an open model when its .ifc file changes on disk."
+        },
+        "ifcViewer.autoReload.debounceMs": {
+          "type": "integer",
+          "default": 750,
+          "minimum": 100,
+          "maximum": 10000,
+          "order": 11,
+          "description": "Wait this long after the last file change before reloading, in milliseconds."
+        },
+        "ifcViewer.autoReload.stabilityCheckMs": {
+          "type": "integer",
+          "default": 300,
+          "minimum": 50,
+          "maximum": 5000,
+          "order": 12,
+          "description": "Reload only once two file checks this far apart see the same size and time, in milliseconds."
+        },
+        "ifcViewer.autoReload.keepView": {
+          "type": "boolean",
+          "default": true,
+          "order": 13,
+          "description": "Keep the camera, selection and agent highlights across a reload."
+        },
+        "ifcViewer.highlightLegend.visible": {
+          "type": "boolean",
+          "default": true,
+          "order": 14,
+          "description": "Show the legend of highlight groups (with clear buttons) while any group exists."
+        }
+      }
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
@@ -69,7 +208,7 @@
     "package": "node esbuild.mjs --production && vsce package --no-dependencies -o ../../"
   },
   "dependencies": {
-    "@vscode-ifc-viewer/core": "1.2.0"
+    "@vscode-ifc-viewer/core": "1.4.0"
   },
   "devDependencies": {
     "@types/mocha": "10.0.10",

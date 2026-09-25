@@ -3,6 +3,7 @@
 import * as THREE from 'three';
 
 import { ModelBatcher } from './batcher.js';
+import type { HighlightInfo } from './highlights.js';
 import type { IfcMesh, ModelBounds } from '../engine/types.js';
 
 export interface CameraPose {
@@ -293,6 +294,23 @@ export class SceneController {
 
   clearHighlight(): void {
     this.batcher.clearHighlight();
+  }
+
+  /** Colour a named group of elements ('#rrggbb'); newer groups win overlaps. */
+  setHighlightSet(label: string, expressIDs: Iterable<number>, color: string, count: number): void {
+    this.batcher.setHighlightSet(label, expressIDs, color, count);
+  }
+
+  clearHighlightSet(label?: string): void {
+    this.batcher.clearHighlightSet(label);
+  }
+
+  getHighlightSets(): HighlightInfo[] {
+    return this.batcher.highlightSetList();
+  }
+
+  nextHighlightColor(): string {
+    return this.batcher.nextHighlightColor();
   }
 
   allExpressIDs(): number[] {

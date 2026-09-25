@@ -6,6 +6,7 @@ import { IfcAPI } from 'web-ifc';
 import * as WebIfc from 'web-ifc';
 
 import type {
+  GlobalIdResolution,
   IfcEngine,
   IfcMesh,
   IfcProperty,
@@ -25,6 +26,7 @@ import type {
 
 const IFC = WebIfc as unknown as Record<string, number>;
 const IFCPROJECT = IFC.IFCPROJECT;
+const IFCPRODUCT = IFC.IFCPRODUCT;
 const IFCRELAGGREGATES = IFC.IFCRELAGGREGATES;
 const IFCRELCONTAINEDINSPATIALSTRUCTURE = IFC.IFCRELCONTAINEDINSPATIALSTRUCTURE;
 const IFCRELDEFINESBYPROPERTIES = IFC.IFCRELDEFINESBYPROPERTIES;
@@ -56,6 +58,9 @@ export interface WebIfcAdapterOptions {
   wasmBinary?: Uint8Array;
 }
 
+/** Lines per raw read while building the GlobalId index (bounds peak memory). */
+const GLOBAL_ID_CHUNK = 4096;
+
 /** Cap web-ifc's internal allocation well below the wasm32 4 GB ceiling. */
 const MEMORY_LIMIT_BYTES = 3 * 1024 * 1024 * 1024;
 
@@ -77,11 +82,18 @@ interface CachedGeometry {
   triangles: number;
 }
 
+interface GlobalIdIndex {
+  byGlobalId: Map<string, number>;
+  byExpressID: Map<number, { globalId: string; ifcClass: string }>;
+}
+
 interface ModelState {
   /** elementExpressID -> property-definition expressIDs (psets + qtos). */
   relDefsByObject: Map<number, number[]> | null;
   /** geometryExpressID -> converted triangle data, shared across placements. */
   geometryCache: Map<number, CachedGeometry>;
+  /** Built on first GlobalId lookup, so loads without a lookup pay nothing. */
+  globalIds: GlobalIdIndex | null;
 }
 
 type WebIfcValue =
@@ -207,7 +219,7 @@ export class WebIfcAdapter implements IfcEngine {
     }
     emit(onProgress, { phase: 'parsing', entities: 0, totalEntities, meshes: 0 });
 
-    this.models.set(modelID, { relDefsByObject: null, geometryCache: new Map() });
+    this.models.set(modelID, { relDefsByObject: null, geometryCache: new Map(), globalIds: null });
 
     const meshes: IfcMesh[] = [];
     const seenElements = new Set<number>();
@@ -453,6 +465,25 @@ export class WebIfcAdapter implements IfcEngine {
     };
   }
 
+  resolveGlobalIds(modelID: number, globalIds: readonly string[]): GlobalIdResolution {
+    const { byGlobalId, byExpressID } = this.globalIdIndex(modelID);
+    const found: GlobalIdResolution['found'] = [];
+    const missing: string[] = [];
+    const seen = new Set<string>();
+    for (const globalId of globalIds) {
+      if (seen.has(globalId)) continue;
+      seen.add(globalId);
+      const expressID = byGlobalId.get(globalId);
+      if (expressID === undefined) missing.push(globalId);
+      else found.push({ globalId, expressID, ifcClass: byExpressID.get(expressID)!.ifcClass });
+    }
+    return { found, missing };
+  }
+
+  globalIdOf(modelID: number, expressID: number): string | null {
+    return this.globalIdIndex(modelID).byExpressID.get(expressID)?.globalId ?? null;
+  }
+
   /** Free converted-geometry memory kept for dedup during streaming. */
   clearGeometryCache(modelID: number): void {
     this.models.get(modelID)?.geometryCache.clear();
@@ -501,12 +532,53 @@ export class WebIfcAdapter implements IfcEngine {
     const state = this.models.get(modelID) ?? {
       relDefsByObject: null,
       geometryCache: new Map<number, CachedGeometry>(),
+      globalIds: null,
     };
     if (!state.relDefsByObject) {
       state.relDefsByObject = this.buildRelDefIndex(modelID);
       this.models.set(modelID, state);
     }
     return state.relDefsByObject.get(expressID) ?? [];
+  }
+
+  private globalIdIndex(modelID: number): GlobalIdIndex {
+    const state = this.models.get(modelID);
+    if (!state) throw new Error(`Model ${modelID} is not open.`);
+    state.globalIds ??= this.buildGlobalIdIndex(modelID);
+    return state.globalIds;
+  }
+
+  /**
+   * Index every IfcProduct (elements, spatial structure, openings, ...) plus
+   * the IfcProject. Raw line reads skip web-ifc's typed-object construction;
+   * the cost is a few microseconds per element.
+   */
+  private buildGlobalIdIndex(modelID: number): GlobalIdIndex {
+    const ids: number[] = [];
+    for (const type of [IFCPROJECT, IFCPRODUCT]) {
+      const lines = this.api.GetLineIDsWithType(modelID, type, true);
+      for (let i = 0; i < lines.size(); i++) ids.push(lines.get(i));
+    }
+    const byGlobalId = new Map<string, number>();
+    const byExpressID: GlobalIdIndex['byExpressID'] = new Map();
+    const classNames = new Map<number, string>();
+    for (let start = 0; start < ids.length; start += GLOBAL_ID_CHUNK) {
+      const lines = this.api.GetRawLinesData(modelID, ids.slice(start, start + GLOBAL_ID_CHUNK));
+      for (const line of lines) {
+        // IfcRoot.GlobalId is the first attribute of every indexed class.
+        const globalId = unwrap(line.arguments[0] as WebIfcValue);
+        if (typeof globalId !== 'string' || globalId === '') continue;
+        let ifcClass = classNames.get(line.type);
+        if (ifcClass === undefined) {
+          ifcClass = this.api.GetNameFromTypeCode(line.type);
+          classNames.set(line.type, ifcClass);
+        }
+        byExpressID.set(line.ID, { globalId, ifcClass });
+        // Duplicate GlobalIds are invalid IFC; the first occurrence wins.
+        if (!byGlobalId.has(globalId)) byGlobalId.set(globalId, line.ID);
+      }
+    }
+    return { byGlobalId, byExpressID };
   }
 
   private buildRelDefIndex(modelID: number): Map<number, number[]> {

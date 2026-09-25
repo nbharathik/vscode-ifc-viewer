@@ -95,6 +95,10 @@ async function loadLocalFile(file: File): Promise<void> {
   await viewer.load(bytes, { onProgress: (p) => logPhase(p.phase) });
 }
 
+let highlightEvents = 0;
+viewer.onHighlightsChange(() => highlightEvents++);
+let testToolbarClicks = 0;
+
 const hooks: HarnessHooks = {
   loadFixture,
   getStats: () => viewer.getStats(),
@@ -147,6 +151,25 @@ const hooks: HarnessHooks = {
   getRendererInfo: () => viewer.getRendererInfo(),
   dispose: () => viewer.dispose(),
   getProperties: (expressID) => viewer.getProperties(expressID),
+  resolveGlobalIds: (globalIds) => viewer.resolveGlobalIds(globalIds),
+  globalIdOf: (expressID) => viewer.globalIdOf(expressID),
+  setHighlight: (label, expressIDs, color) => viewer.setHighlight(label, expressIDs, color),
+  clearHighlight: (label) => viewer.clearHighlight(label),
+  getHighlights: () => viewer.getHighlights(),
+  getHighlightEvents: () => highlightEvents,
+  isolate: (expressIDs) => viewer.isolate(expressIDs),
+  isIsolated: () => viewer.isIsolated(),
+  fitTo: (expressIDs) => viewer.fitTo(expressIDs),
+  setHighlightLegendEnabled: (enabled) => viewer.setHighlightLegendEnabled(enabled),
+  addTestToolbarButton: () => {
+    viewer.addToolbarButton({
+      id: 'btn-test',
+      label: 'Test button',
+      icon: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="4" fill="currentColor"/></svg>',
+      onClick: () => testToolbarClicks++,
+    });
+  },
+  getTestToolbarClicks: () => testToolbarClicks,
   isReady: () => viewer.isReady(),
   render: () => viewer.render(),
   setPerfHud: () => viewer.togglePerfHud(),

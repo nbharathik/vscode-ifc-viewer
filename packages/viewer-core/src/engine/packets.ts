@@ -1,7 +1,14 @@
 // Transfer format for streaming meshes out of the parser worker: each unique
 // geometry crosses once, placements reference it by geometryID, and all typed
 // arrays are transferable (no copies).
-import type { IfcMesh, LoadProgress, LoadedModelMeta, MeshGeometry, Vec3 } from './types.js';
+import type {
+  GlobalIdResolution,
+  IfcMesh,
+  LoadProgress,
+  LoadedModelMeta,
+  MeshGeometry,
+  Vec3,
+} from './types.js';
 
 /** Unique geometries new in this batch, concatenated into shared arrays. */
 export interface GeometryTable {
@@ -41,6 +48,8 @@ export type WorkerRequest =
   | { type: 'load'; id: number; url?: string; bytes?: Uint8Array; fileName?: string; downloadMs?: number }
   | { type: 'loadCategory'; id: number; modelID: number; category: string }
   | { type: 'getProperties'; id: number; modelID: number; expressID: number }
+  | { type: 'resolveGlobalIds'; id: number; modelID: number; globalIds: string[] }
+  | { type: 'globalIdOf'; id: number; modelID: number; expressID: number }
   | { type: 'dispose'; modelID: number };
 
 /** Messages from the worker to the client. */
@@ -52,6 +61,8 @@ export type WorkerResponse =
   | { type: 'loadDone'; id: number; result: LoadedModelMeta }
   | { type: 'categoryDone'; id: number }
   | { type: 'properties'; id: number; result: unknown }
+  | { type: 'globalIds'; id: number; result: GlobalIdResolution }
+  | { type: 'globalId'; id: number; result: string | null }
   | { type: 'fail'; id: number; message: string };
 
 /** Accumulates meshes worker-side and drains them as one transferable batch. */

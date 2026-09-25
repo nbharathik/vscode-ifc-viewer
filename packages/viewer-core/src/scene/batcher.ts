@@ -1,10 +1,12 @@
 // GPU batching: unique geometry is baked into spatially bucketed merged
 // chunks, repeated geometry becomes instanced meshes. Per-element state
-// (visible, highlighted) lives in a data texture read by a patched Lambert
-// shader; picking is a GPU ID pass. Origin shift happens in f64 before the
-// f32 cast so georeferenced models do not jitter.
+// (visible, selected, highlight group) lives in a data texture read by a
+// patched Lambert shader; picking is a GPU ID pass. Origin shift happens in
+// f64 before the f32 cast so georeferenced models do not jitter.
 import * as THREE from 'three';
 
+import { HighlightSets, MAX_HIGHLIGHT_SETS } from './highlights.js';
+import type { HighlightInfo } from './highlights.js';
 import type { IfcMesh, ModelBounds, Vec3 } from '../engine/types.js';
 
 /** Deterministic, pleasant color from an integer key (golden-angle hue). */
@@ -21,6 +23,8 @@ function isDefaultWhite(c: { r: number; g: number; b: number; a: number }): bool
 const HIGHLIGHT_GLSL = 'vec3(1.0, 0.26225, 0.01033) * 0.55';
 
 const STATE_TEX_WIDTH = 1024;
+/** Highlight palette texels: slot 0 (unused) plus one per group. */
+const PALETTE_WIDTH = MAX_HIGHLIGHT_SETS + 1;
 /** Vertex budget per merged chunk; bounds single-buffer size and draw grouping. */
 const CHUNK_VERTEX_LIMIT = 500_000;
 /** Far-from-origin threshold (m). Beyond this we recenter to avoid f32 jitter. */
@@ -145,12 +149,17 @@ export class ModelBatcher {
   private boundsMin: Vec3 | null = null;
   private boundsMax: Vec3 | null = null;
 
-  // Per-element state texture: R = visible, G = highlighted.
+  // Per-element state texture: R = visible, G = selected, B = highlight slot.
   private stateData: Uint8Array;
   private stateTexture: THREE.DataTexture;
   private stateCapacity: number;
   private readonly stateTexUniform: { value: THREE.Texture };
   private readonly stateSizeUniform: { value: THREE.Vector2 };
+  /** Highlight group colours by slot, sRGB bytes decoded to linear on sampling. */
+  private readonly paletteData = new Uint8Array(PALETTE_WIDTH * 4);
+  private readonly paletteTexture: THREE.DataTexture;
+  private readonly paletteTexUniform: { value: THREE.Texture };
+  private readonly highlightSets = new HighlightSets();
 
   private readonly mergedOpaque: THREE.MeshLambertMaterial;
   private readonly mergedTransparent: THREE.MeshLambertMaterial;
@@ -180,6 +189,12 @@ export class ModelBatcher {
     this.stateTexture = this.makeStateTexture(this.stateData, 64);
     this.stateTexUniform = { value: this.stateTexture };
     this.stateSizeUniform = { value: new THREE.Vector2(STATE_TEX_WIDTH, 64) };
+    this.paletteTexture = new THREE.DataTexture(this.paletteData, PALETTE_WIDTH, 1, THREE.RGBAFormat);
+    this.paletteTexture.colorSpace = THREE.SRGBColorSpace;
+    this.paletteTexture.minFilter = THREE.NearestFilter;
+    this.paletteTexture.magFilter = THREE.NearestFilter;
+    this.paletteTexture.needsUpdate = true;
+    this.paletteTexUniform = { value: this.paletteTexture };
 
     this.mergedOpaque = this.makeLambert(false, true);
     this.mergedTransparent = this.makeLambert(true, true);
@@ -195,7 +210,10 @@ export class ModelBatcher {
     return tex;
   }
 
-  /** Lambert with the element-state patch (discard hidden, add highlight). */
+  /**
+   * Lambert with the element-state patch: discard hidden, replace the base
+   * colour with the highlight group colour, add the selection glow.
+   */
   private makeLambert(transparent: boolean, vertexColors: boolean): THREE.MeshLambertMaterial {
     const material = new THREE.MeshLambertMaterial({
       side: THREE.DoubleSide,
@@ -209,9 +227,11 @@ export class ModelBatcher {
     });
     const stateTexUniform = this.stateTexUniform;
     const stateSizeUniform = this.stateSizeUniform;
+    const paletteTexUniform = this.paletteTexUniform;
     material.onBeforeCompile = (shader) => {
       shader.uniforms.uStateTex = stateTexUniform;
       shader.uniforms.uStateSize = stateSizeUniform;
+      shader.uniforms.uPaletteTex = paletteTexUniform;
       shader.vertexShader = shader.vertexShader
         .replace(
           'void main() {',
@@ -220,10 +240,16 @@ export class ModelBatcher {
       shader.fragmentShader = shader.fragmentShader
         .replace(
           'void main() {',
-          'uniform sampler2D uStateTex;\nuniform vec2 uStateSize;\nvarying float vElementIndex;\nvoid main() {\n' +
+          'uniform sampler2D uStateTex;\nuniform vec2 uStateSize;\nuniform sampler2D uPaletteTex;\nvarying float vElementIndex;\nvoid main() {\n' +
             '\tvec2 stUv = (vec2(mod(vElementIndex, uStateSize.x), floor(vElementIndex / uStateSize.x)) + 0.5) / uStateSize;\n' +
             '\tvec4 ifcState = texture2D(uStateTex, stUv);\n' +
             '\tif (ifcState.r < 0.5) discard;',
+        )
+        .replace(
+          '#include <color_fragment>',
+          '#include <color_fragment>\n' +
+            '\tfloat hlSlot = floor(ifcState.b * 255.0 + 0.5);\n' +
+            `\tif (hlSlot > 0.5) diffuseColor.rgb = texture2D(uPaletteTex, vec2((hlSlot + 0.5) / ${PALETTE_WIDTH}.0, 0.5)).rgb;`,
         )
         .replace(
           '#include <emissivemap_fragment>',
@@ -725,7 +751,7 @@ export class ModelBatcher {
     const base = record.index * 4;
     this.stateData[base] = this.isVisible(record, expressID) ? 255 : 0;
     this.stateData[base + 1] = this.highlighted === expressID ? 255 : 0;
-    this.stateData[base + 2] = 0;
+    this.stateData[base + 2] = this.highlightSets.slotOf(expressID);
     this.stateData[base + 3] = 255;
     this.stateTexture.needsUpdate = true;
   }
@@ -818,6 +844,41 @@ export class ModelBatcher {
     this.highlighted = null;
     if (prev !== null) {
       const record = this.elements.get(prev);
+      if (record) this.writeState(record);
+    }
+  }
+
+  /**
+   * Colour a named group of elements (`color` is '#rrggbb'). Ids without
+   * geometry yet (lazy categories) take the colour when they load.
+   */
+  setHighlightSet(label: string, expressIDs: Iterable<number>, color: string, count: number): void {
+    const { slot, changed } = this.highlightSets.set(label, expressIDs, color, count);
+    const texel = slot * 4;
+    this.paletteData[texel] = parseInt(color.slice(1, 3), 16);
+    this.paletteData[texel + 1] = parseInt(color.slice(3, 5), 16);
+    this.paletteData[texel + 2] = parseInt(color.slice(5, 7), 16);
+    this.paletteData[texel + 3] = 255;
+    this.paletteTexture.needsUpdate = true;
+    this.writeStates(changed);
+  }
+
+  /** Remove one highlight group, or all of them without a label. */
+  clearHighlightSet(label?: string): void {
+    this.writeStates(this.highlightSets.clear(label));
+  }
+
+  highlightSetList(): HighlightInfo[] {
+    return this.highlightSets.list();
+  }
+
+  nextHighlightColor(): string {
+    return this.highlightSets.nextDefaultColor();
+  }
+
+  private writeStates(expressIDs: Iterable<number>): void {
+    for (const id of expressIDs) {
+      const record = this.elements.get(id);
       if (record) this.writeState(record);
     }
   }
@@ -924,6 +985,7 @@ export class ModelBatcher {
     this.instTransparentByAlpha.clear();
     this.pickMaterial.dispose();
     this.stateTexture.dispose();
+    this.paletteTexture.dispose();
     this.elements.clear();
     this.elementsByIndex.length = 0;
     this.instancedEntries.length = 0;

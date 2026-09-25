@@ -9,15 +9,20 @@ import { PropertiesPanel } from './panels/properties.js';
 import { TreePanel } from './panels/tree.js';
 import { Toolbar } from './panels/toolbar.js';
 import { StatsPanel } from './panels/stats.js';
+import { HighlightLegend } from './panels/legend.js';
+import type { ToolbarButtonHandle, ToolbarButtonSpec } from './panels/toolbar.js';
 import { PerfHud } from './panels/perfHud.js';
 import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
 import { buildSearchIndex, filterElementIDs } from './search.js';
 import type { SearchIndex } from './search.js';
+import { normalizeColor } from './scene/highlights.js';
+import type { HighlightInfo } from './scene/highlights.js';
 import type { CameraPose, ProjectionMode, SceneInfo, SectionAxis } from './scene/scene.js';
 import type { PickResult, StandardView } from './scene/controls.js';
 import type {
   AsyncIfcEngine,
+  GlobalIdResolution,
   ItemProperties,
   LazyCategory,
   LoadProgress,
@@ -31,6 +36,8 @@ import type {
 export * from './engine/types.js';
 export type { CameraPose, ProjectionMode, SceneInfo, SectionAxis } from './scene/scene.js';
 export type { StandardView } from './scene/controls.js';
+export type { HighlightInfo } from './scene/highlights.js';
+export type { ToolbarButtonHandle, ToolbarButtonSpec } from './panels/toolbar.js';
 export type { SearchEntry, SearchIndex, StoreyInfo } from './search.js';
 export { buildSearchIndex, queryIndex } from './search.js';
 
@@ -112,6 +119,14 @@ export interface Viewer {
   /** Search index over the spatial tree; built once per load, null before one. */
   getSearchIndex(): SearchIndex | null;
   getProperties(expressID: number): Promise<ItemProperties | null>;
+  /**
+   * Map IFC GlobalIds (IfcProduct and IfcProject instances) to expressIDs in
+   * the loaded model. Without a model every id is missing. Rejects when the
+   * model is replaced mid-lookup. The index builds on the first call.
+   */
+  resolveGlobalIds(globalIds: readonly string[]): Promise<GlobalIdResolution>;
+  /** GlobalId of an element in the loaded model, or null. */
+  globalIdOf(expressID: number): Promise<string | null>;
   /** Select an element: highlight + notify subscribers. null clears. */
   select(expressID: number | null): void;
   clearSelection(): void;
@@ -122,9 +137,34 @@ export interface Viewer {
   onModelLoaded(listener: () => void): () => void;
   /** Subscribe to view-state changes (camera, panels, section, filters). */
   onViewChanged(listener: () => void): () => void;
+  /**
+   * Colour a named group of elements. Spatial containers (storeys, ...) and
+   * aggregates expand to their contents. Reusing a label replaces that group.
+   * Newer groups win where groups overlap. Groups sit alongside selection,
+   * hide/isolate and filters, and reset when a model loads. `color` is
+   * '#rgb', '#rrggbb' or a CSS colour name; omitted, a default is picked.
+   * Throws on an empty label or an unknown colour.
+   */
+  setHighlight(label: string, expressIDs: readonly number[], color?: string): void;
+  /** Remove one highlight group, or all of them without a label. */
+  clearHighlight(label?: string): void;
+  /** Highlight groups, oldest first. */
+  getHighlights(): HighlightInfo[];
+  /** Subscribe to highlight group changes; returns an unsubscribe function. */
+  onHighlightsChange(listener: () => void): () => void;
+  /** Show or suppress the highlight legend (shown only while groups exist). */
+  setHighlightLegendEnabled(enabled: boolean): void;
+  /** Add an icon button to the toolbar; null when panels are not mounted. */
+  addToolbarButton(spec: ToolbarButtonSpec): ToolbarButtonHandle | null;
   /** Visibility. */
   hideSelected(): void;
   isolateSelected(): void;
+  /** Hide everything except these elements (containers expand). Empty is a no-op. */
+  isolate(expressIDs: readonly number[]): void;
+  /** True between an isolate and the next show-all (or load). */
+  isIsolated(): boolean;
+  /** Subscribe to hide/isolate/show-all changes; returns an unsubscribe function. */
+  onVisibilityChange(listener: () => void): () => void;
   showAll(): void;
   setSubtreeVisible(expressID: number, visible: boolean): void;
   isSubtreeVisible(expressID: number): boolean;
@@ -172,6 +212,8 @@ export interface Viewer {
   fitToElement(expressID: number): CameraPose | null;
   /** Frame the current selection (subtree bounds); null without a selection. */
   fitToSelection(): CameraPose | null;
+  /** Frame these elements (containers expand); null when none has geometry. */
+  fitTo(expressIDs: readonly number[]): CameraPose | null;
   /** Deterministic standard camera poses (top/front/right/... and isometric). */
   setStandardView(view: StandardView): CameraPose;
   getProjection(): ProjectionMode;
@@ -214,6 +256,7 @@ class ViewerImpl implements Viewer {
   private readonly treePanel: TreePanel | null;
   private readonly toolbar: Toolbar | null;
   private readonly statsPanel: StatsPanel | null;
+  private readonly legend: HighlightLegend | null;
   private readonly perfHud: PerfHud;
   private readonly loadingOverlay: LoadingOverlay;
   private readonly errorCard: ErrorCard;
@@ -233,11 +276,16 @@ class ViewerImpl implements Viewer {
   private typeFilter: string[] | null = null;
   private storeyFilter: number[] | null = null;
   private cachedTree: SpatialNode | null = null;
+  /** expressID -> spatial tree node, built on first use per model. */
+  private nodeIndex: Map<number, SpatialNode> | null = null;
   private searchIndex: SearchIndex | null = null;
   private readonly loadedCategories = new Set<LazyCategory>();
   private readonly selectionListeners = new Set<(expressID: number | null) => void>();
   private readonly modelLoadedListeners = new Set<() => void>();
   private readonly viewChangedListeners = new Set<() => void>();
+  private readonly highlightListeners = new Set<() => void>();
+  private readonly visibilityListeners = new Set<() => void>();
+  private isolated = false;
 
   constructor(
     private readonly container: HTMLElement,
@@ -268,6 +316,7 @@ class ViewerImpl implements Viewer {
     this.treePanel = mountPanels ? new TreePanel(this.container, this) : null;
     this.toolbar = mountPanels ? new Toolbar(this.container, this) : null;
     this.statsPanel = mountPanels ? new StatsPanel(this.container, this) : null;
+    this.legend = mountPanels ? new HighlightLegend(this.container, this) : null;
     this.perfHud = new PerfHud(this.container, {
       getRendererInfo: () => this.scene.getRendererInfo(),
       getRenderTiming: () => this.scene.getRenderTiming(),
@@ -348,6 +397,12 @@ class ViewerImpl implements Viewer {
     this.loading = true;
     this.ready = false;
 
+    // Highlight groups hold expressIDs, which mean nothing in the next model.
+    // Checked before clearModel, which drops them silently with the batcher.
+    if (this.scene.getHighlightSets().length > 0) {
+      this.scene.clearHighlightSet();
+      this.emitHighlights();
+    }
     if (this.currentModelID !== null) {
       this.scene.clearHighlight();
       this.scene.clearModel();
@@ -361,8 +416,13 @@ class ViewerImpl implements Viewer {
 
     this.loadedCategories.clear();
     this.cachedTree = null;
+    this.nodeIndex = null;
     this.searchIndex = null;
     this.stats = null;
+    if (this.isolated) {
+      this.isolated = false;
+      this.emitVisibility();
+    }
     // Per-model view tooling resets with the model it applied to.
     this.section = defaultSection();
     this.sectionPositioned = false;
@@ -490,6 +550,28 @@ class ViewerImpl implements Viewer {
     }
   }
 
+  async resolveGlobalIds(globalIds: readonly string[]): Promise<GlobalIdResolution> {
+    if (this.currentModelID === null || !this.engine) {
+      return { found: [], missing: [...new Set(globalIds)] };
+    }
+    const token = this.loadToken;
+    const result = await this.engine.resolveGlobalIds(this.currentModelID, globalIds);
+    // expressIDs are per model; a reload in between makes them meaningless.
+    if (token !== this.loadToken) throw new Error('The model was reloaded during the lookup.');
+    return result;
+  }
+
+  async globalIdOf(expressID: number): Promise<string | null> {
+    if (this.currentModelID === null || !this.engine) return null;
+    const token = this.loadToken;
+    try {
+      const globalId = await this.engine.globalIdOf(this.currentModelID, expressID);
+      return token === this.loadToken ? globalId : null;
+    } catch {
+      return null;
+    }
+  }
+
   select(expressID: number | null): void {
     if (expressID === this.selection) return;
     if (expressID === null) {
@@ -537,53 +619,131 @@ class ViewerImpl implements Viewer {
     for (const listener of this.viewChangedListeners) listener();
   }
 
+  // -- highlight groups ---------------------------------------------------
+  setHighlight(label: string, expressIDs: readonly number[], color?: string): void {
+    if (!label.trim()) throw new Error('A highlight group needs a label.');
+    const normalized =
+      color === undefined ? this.scene.nextHighlightColor() : normalizeColor(color);
+    if (!normalized) throw new Error(`Unknown colour "${color}".`);
+    const count = new Set(expressIDs).size;
+    this.scene.setHighlightSet(label, this.expandSubtrees(expressIDs), normalized, count);
+    this.scene.render();
+    this.emitHighlights();
+  }
+
+  clearHighlight(label?: string): void {
+    const before = this.scene.getHighlightSets().length;
+    this.scene.clearHighlightSet(label);
+    if (this.scene.getHighlightSets().length === before) return;
+    this.scene.render();
+    this.emitHighlights();
+  }
+
+  getHighlights(): HighlightInfo[] {
+    return this.scene.getHighlightSets();
+  }
+
+  onHighlightsChange(listener: () => void): () => void {
+    this.highlightListeners.add(listener);
+    return () => this.highlightListeners.delete(listener);
+  }
+
+  private emitHighlights(): void {
+    for (const listener of this.highlightListeners) listener();
+  }
+
+  setHighlightLegendEnabled(enabled: boolean): void {
+    this.legend?.setEnabled(enabled);
+  }
+
+  addToolbarButton(spec: ToolbarButtonSpec): ToolbarButtonHandle | null {
+    return this.toolbar ? this.toolbar.addButton(spec) : null;
+  }
+
+  isIsolated(): boolean {
+    return this.isolated;
+  }
+
+  onVisibilityChange(listener: () => void): () => void {
+    this.visibilityListeners.add(listener);
+    return () => this.visibilityListeners.delete(listener);
+  }
+
+  private emitVisibility(): void {
+    for (const listener of this.visibilityListeners) listener();
+  }
+
   // -- visibility ---------------------------------------------------------
-  /** expressIDs in the subtree rooted at `expressID` that have geometry. */
-  private subtreeElementIds(expressID: number): number[] {
-    const node = this.findNode(expressID);
-    if (!node) return this.scene.hasElement(expressID) ? [expressID] : [];
-    const ids: number[] = [];
+  /**
+   * The given expressIDs plus everything below them in the spatial tree
+   * (contained and aggregated). Ids outside the tree pass through unchanged.
+   */
+  private expandSubtrees(expressIDs: Iterable<number>): Set<number> {
+    const out = new Set<number>();
     const walk = (n: SpatialNode): void => {
-      if (this.scene.hasElement(n.expressID)) ids.push(n.expressID);
+      // A node already present was walked (or has no children to add).
+      if (out.has(n.expressID)) return;
+      out.add(n.expressID);
       n.children.forEach(walk);
     };
-    walk(node);
-    return ids;
+    for (const id of expressIDs) {
+      const node = this.findNode(id);
+      if (node) walk(node);
+      else out.add(id);
+    }
+    return out;
+  }
+
+  /** expressIDs in the subtree rooted at `expressID` that have geometry. */
+  private subtreeElementIds(expressID: number): number[] {
+    return [...this.expandSubtrees([expressID])].filter((id) => this.scene.hasElement(id));
   }
 
   private findNode(expressID: number): SpatialNode | null {
-    const walk = (n: SpatialNode): SpatialNode | null => {
-      if (n.expressID === expressID) return n;
-      for (const child of n.children) {
-        const hit = walk(child);
-        if (hit) return hit;
-      }
-      return null;
-    };
-    return this.cachedTree ? walk(this.cachedTree) : null;
+    if (!this.nodeIndex && this.cachedTree) {
+      const index = new Map<number, SpatialNode>();
+      const walk = (n: SpatialNode): void => {
+        index.set(n.expressID, n);
+        n.children.forEach(walk);
+      };
+      walk(this.cachedTree);
+      this.nodeIndex = index;
+    }
+    return this.nodeIndex?.get(expressID) ?? null;
   }
 
   hideSelected(): void {
     if (this.selection === null) return;
     this.scene.setHidden(this.subtreeElementIds(this.selection), true);
     this.scene.render();
+    this.emitVisibility();
   }
 
   isolateSelected(): void {
     if (this.selection === null) return;
-    this.scene.isolate(this.subtreeElementIds(this.selection));
+    this.isolate([this.selection]);
+  }
+
+  isolate(expressIDs: readonly number[]): void {
+    if (expressIDs.length === 0) return;
+    this.scene.isolate(this.expandSubtrees(expressIDs));
     this.scene.render();
+    this.isolated = true;
+    this.emitVisibility();
   }
 
   /** Clears manual hide/isolate state; active filters are left untouched. */
   showAll(): void {
     this.scene.showAll();
     this.scene.render();
+    this.isolated = false;
+    this.emitVisibility();
   }
 
   setSubtreeVisible(expressID: number, visible: boolean): void {
     this.scene.setHidden(this.subtreeElementIds(expressID), !visible);
     this.scene.render();
+    this.emitVisibility();
   }
 
   isSubtreeVisible(expressID: number): boolean {
@@ -837,9 +997,12 @@ class ViewerImpl implements Viewer {
 
   fitToSelection(): CameraPose | null {
     if (this.selection === null) return null;
-    const ids = this.subtreeElementIds(this.selection);
+    return this.fitTo([this.selection]);
+  }
+
+  fitTo(expressIDs: readonly number[]): CameraPose | null {
     let bounds: ModelBounds | null = null;
-    for (const id of ids) {
+    for (const id of this.expandSubtrees(expressIDs)) {
       const b = this.scene.getElementBounds(id);
       if (!b) continue;
       if (!bounds) {
@@ -975,6 +1138,7 @@ class ViewerImpl implements Viewer {
     this.treePanel?.dispose();
     this.toolbar?.dispose();
     this.statsPanel?.dispose();
+    this.legend?.dispose();
     this.perfHud.dispose();
     this.loadingOverlay.dispose();
     this.errorCard.dispose();

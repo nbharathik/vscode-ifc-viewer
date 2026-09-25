@@ -7,6 +7,7 @@ import {
   CancelledError,
   type AsyncIfcEngine,
   type AsyncLoadOptions,
+  type GlobalIdResolution,
   type IfcMesh,
   type ItemProperties,
   type LazyCategory,
@@ -226,7 +227,9 @@ export class WorkerEngine implements AsyncIfcEngine {
         (p?.resolve as ((v: void) => void) | undefined)?.(undefined);
         break;
       }
-      case 'properties': {
+      case 'properties':
+      case 'globalIds':
+      case 'globalId': {
         const p = this.pending.get(msg.id);
         this.pending.delete(msg.id);
         (p?.resolve as ((v: unknown) => void) | undefined)?.(msg.result);
@@ -369,6 +372,22 @@ export class WorkerEngine implements AsyncIfcEngine {
     return new Promise<ItemProperties>((resolve, reject) => {
       this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
       this.send({ type: 'getProperties', id, modelID, expressID });
+    });
+  }
+
+  resolveGlobalIds(modelID: number, globalIds: readonly string[]): Promise<GlobalIdResolution> {
+    const id = this.nextId++;
+    return new Promise<GlobalIdResolution>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
+      this.send({ type: 'resolveGlobalIds', id, modelID, globalIds: [...globalIds] });
+    });
+  }
+
+  globalIdOf(modelID: number, expressID: number): Promise<string | null> {
+    const id = this.nextId++;
+    return new Promise<string | null>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: never) => void, reject });
+      this.send({ type: 'globalIdOf', id, modelID, expressID });
     });
   }
 

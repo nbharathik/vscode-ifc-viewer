@@ -140,6 +140,15 @@ export type LoadSource =
 /** IFC classes excluded from the default geometry stream, loaded on demand. */
 export type LazyCategory = 'IfcSpace' | 'IfcOpeningElement';
 
+/**
+ * GlobalIds mapped to expressIDs for one model. Every distinct requested id
+ * appears exactly once, in request order, in either `found` or `missing`.
+ */
+export interface GlobalIdResolution {
+  found: { globalId: string; expressID: number; ifcClass: string }[];
+  missing: string[];
+}
+
 /** Thin adapter surface over the IFC engine (web-ifc today). */
 export interface IfcEngine {
   init(): Promise<void>;
@@ -148,6 +157,10 @@ export interface IfcEngine {
   loadCategory(modelID: number, category: LazyCategory, onMesh?: (mesh: IfcMesh) => void): IfcMesh[];
   getSpatialTree(modelID: number): SpatialNode;
   getItemProperties(modelID: number, expressID: number): ItemProperties;
+  /** Map GlobalIds of IfcProduct/IfcProject instances to expressIDs. */
+  resolveGlobalIds(modelID: number, globalIds: readonly string[]): GlobalIdResolution;
+  /** GlobalId of an IfcProduct/IfcProject instance, or null. */
+  globalIdOf(modelID: number, expressID: number): string | null;
   dispose(modelID: number): void;
 }
 
@@ -178,6 +191,8 @@ export interface AsyncIfcEngine {
     onMeshBatch: (meshes: IfcMesh[]) => void,
   ): Promise<void>;
   getItemProperties(modelID: number, expressID: number): Promise<ItemProperties>;
+  resolveGlobalIds(modelID: number, globalIds: readonly string[]): Promise<GlobalIdResolution>;
+  globalIdOf(modelID: number, expressID: number): Promise<string | null>;
   dispose(modelID: number): void;
   /** Abort the in-flight load, if any. The load promise rejects with CancelledError. */
   cancel(): void;

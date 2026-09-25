@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { runTests } from '@vscode/test-electron';
+import { makeTestWorkspace } from './workspace';
 
 async function main(): Promise<void> {
   // Inherited from Electron-based terminals (IDE integrations); makes the
@@ -19,12 +20,15 @@ async function main(): Promise<void> {
   fs.cpSync(path.join(extRoot, 'dist'), path.join(staged, 'dist'), { recursive: true });
   fs.cpSync(path.join(extRoot, 'media'), path.join(staged, 'media'), { recursive: true });
 
+  const fixtures = path.join(repoRoot, 'fixtures');
+  const workspace = makeTestWorkspace(fixtures);
+
   await runTests({
     version: process.env.VSCODE_VERSION || 'stable',
     extensionDevelopmentPath: staged,
     extensionTestsPath: path.resolve(__dirname, './suite/index'),
-    extensionTestsEnv: { IFC_FIXTURES: path.join(repoRoot, 'fixtures') },
-    launchArgs: ['--disable-extensions', '--disable-gpu'],
+    extensionTestsEnv: { IFC_FIXTURES: fixtures, IFC_TEST_WORKSPACE: workspace },
+    launchArgs: [workspace, '--disable-extensions', '--disable-gpu'],
   });
 }
 

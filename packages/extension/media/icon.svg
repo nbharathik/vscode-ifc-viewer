@@ -1,24 +1,26 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#1f6feb"/>
-      <stop offset="1" stop-color="#0b3a8c"/>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
     </linearGradient>
   </defs>
-  <rect width="128" height="128" rx="24" fill="url(#bg)"/>
-  <!-- Isometric building: three stacked storeys -->
-  <g transform="translate(64 70)" stroke="#0b2a5e" stroke-width="2" stroke-linejoin="round">
+  <!-- Tile -->
+  <rect width="128" height="128" rx="28" fill="url(#tile)"/>
+
+  <!-- Isometric building: three storeys, lighter toward the top -->
+  <g stroke-width="2.4" stroke-linejoin="round">
     <!-- bottom storey -->
-    <polygon points="0,28 34,8 0,-12 -34,8" fill="#cfe0ff"/>
-    <polygon points="-34,8 0,28 0,44 -34,24" fill="#7aa2e8"/>
-    <polygon points="34,8 0,28 0,44 34,24" fill="#a7c4f5"/>
+    <polygon points="64,57 98,76 64,95 30,76" fill="#dde8ff" stroke="#dde8ff"/>
+    <polygon points="30,76 64,95 64,106 30,87" fill="#a3bcf3" stroke="#a3bcf3"/>
+    <polygon points="98,76 64,95 64,106 98,87" fill="#c5d6f9" stroke="#c5d6f9"/>
     <!-- middle storey -->
-    <polygon points="0,4 34,-16 0,-36 -34,-16" fill="#e6efff"/>
-    <polygon points="-34,-16 0,4 0,20 -34,0" fill="#7aa2e8"/>
-    <polygon points="34,-16 0,4 0,20 34,0" fill="#a7c4f5"/>
+    <polygon points="64,39 98,58 64,77 30,58" fill="#eef3ff" stroke="#eef3ff"/>
+    <polygon points="30,58 64,77 64,88 30,69" fill="#b3c8f7" stroke="#b3c8f7"/>
+    <polygon points="98,58 64,77 64,88 98,69" fill="#d3e0fb" stroke="#d3e0fb"/>
     <!-- top storey -->
-    <polygon points="0,-20 34,-40 0,-60 -34,-40" fill="#ffffff"/>
-    <polygon points="-34,-40 0,-20 0,-4 -34,-24" fill="#7aa2e8"/>
-    <polygon points="34,-40 0,-20 0,-4 34,-24" fill="#a7c4f5"/>
+    <polygon points="64,21 98,40 64,59 30,40" fill="#ffffff" stroke="#ffffff"/>
+    <polygon points="30,40 64,59 64,70 30,51" fill="#c3d5fb" stroke="#c3d5fb"/>
+    <polygon points="98,40 64,59 64,70 98,51" fill="#e1eafd" stroke="#e1eafd"/>
   </g>
 </svg>

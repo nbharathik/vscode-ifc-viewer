@@ -177,6 +177,18 @@ scope.onmessage = (e: MessageEvent<WorkerRequest>) => {
           post({ type: 'properties', id: req.id, result });
           break;
         }
+        case 'resolveGlobalIds': {
+          if (!adapter) throw new Error('worker: resolveGlobalIds before init');
+          const result = adapter.resolveGlobalIds(req.modelID, req.globalIds);
+          post({ type: 'globalIds', id: req.id, result });
+          break;
+        }
+        case 'globalIdOf': {
+          if (!adapter) throw new Error('worker: globalIdOf before init');
+          const result = adapter.globalIdOf(req.modelID, req.expressID);
+          post({ type: 'globalId', id: req.id, result });
+          break;
+        }
         case 'dispose':
           adapter?.dispose(req.modelID);
           break;

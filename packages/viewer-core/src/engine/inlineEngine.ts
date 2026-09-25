@@ -7,6 +7,7 @@ import {
   CancelledError,
   type AsyncIfcEngine,
   type AsyncLoadOptions,
+  type GlobalIdResolution,
   type IfcMesh,
   type ItemProperties,
   type LazyCategory,
@@ -82,6 +83,14 @@ export class InlineEngine implements AsyncIfcEngine {
 
   async getItemProperties(modelID: number, expressID: number): Promise<ItemProperties> {
     return this.adapter.getItemProperties(modelID, expressID);
+  }
+
+  async resolveGlobalIds(modelID: number, globalIds: readonly string[]): Promise<GlobalIdResolution> {
+    return this.adapter.resolveGlobalIds(modelID, globalIds);
+  }
+
+  async globalIdOf(modelID: number, expressID: number): Promise<string | null> {
+    return this.adapter.globalIdOf(modelID, expressID);
   }
 
   dispose(modelID: number): void {

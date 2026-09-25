@@ -1,5 +1,6 @@
-// Render media/icon.svg -> media/icon.png (128x128) using the Playwright Chromium
-// that's already a dev dependency. Deterministic; run when the SVG changes.
+// Render media/icon.svg -> media/icon.png (256x256, the 128 viewBox at 2x for
+// sharp high-DPI display) using the Playwright Chromium that's already a dev
+// dependency. Deterministic; run when the SVG changes.
 //   node scripts/make_icon.mjs
 import { chromium } from '@playwright/test';
 import { readFileSync } from 'node:fs';
@@ -11,7 +12,7 @@ const mediaDir = resolve(here, '../packages/extension/media');
 const svg = readFileSync(resolve(mediaDir, 'icon.svg'), 'utf8');
 
 const browser = await chromium.launch({ args: ['--headless=new'] });
-const page = await browser.newPage({ viewport: { width: 128, height: 128 }, deviceScaleFactor: 1 });
+const page = await browser.newPage({ viewport: { width: 128, height: 128 }, deviceScaleFactor: 2 });
 await page.setContent(
   `<!doctype html><html><body style="margin:0;padding:0">${svg}</body></html>`,
   { waitUntil: 'load' },
