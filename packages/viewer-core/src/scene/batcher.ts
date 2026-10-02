@@ -373,6 +373,30 @@ export class ModelBatcher {
     for (const chunk of chunks) this.group.add(chunk);
   }
 
+  /**
+   * Retire elements whose geometry was replaced or removed by an edit. Their
+   * old triangles stay in the chunks but are discarded by the shader forever:
+   * the state texel is zeroed and the record is dropped, so the same
+   * expressID can be ingested again and gets a fresh slot (and fresh state
+   * from the hide/highlight sets, which are keyed by expressID).
+   */
+  retire(expressIDs: Iterable<number>): void {
+    let any = false;
+    for (const id of expressIDs) {
+      const record = this.elements.get(id);
+      if (!record) continue;
+      const base = record.index * 4;
+      this.stateData[base] = 0;
+      this.stateData[base + 1] = 0;
+      this.stateData[base + 2] = 0;
+      this.stateData[base + 3] = 255;
+      this.totalTriangles -= record.triangles;
+      this.elements.delete(id);
+      any = true;
+    }
+    if (any) this.stateTexture.needsUpdate = true;
+  }
+
   /** Coarse spatial cell (0..7) of a mesh's AABB center, in shifted space. */
   private bucketOf(mesh: IfcMesh): number {
     const record = this.elements.get(mesh.expressID);

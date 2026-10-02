@@ -108,8 +108,16 @@ export class AutoReloader implements vscode.Disposable {
       previous = current;
     }
     if (!current || panel.disposed || entry.generation !== generation) return;
-    // The watcher can fire without a content change (touch, metadata).
+    // The watcher can fire without a content change (touch, metadata). Our own
+    // saves land here too: the provider records their mtime.
     if (panel.fileMtimeMs !== null && current.mtime === panel.fileMtimeMs) return;
+    // Reloading would drop unsaved edits held by IfcOpenShell.
+    if (panel.session?.dirty) {
+      void vscode.window.showWarningMessage(
+        `IFC Viewer: ${panel.fileName} changed on disk, but it has unsaved changes. Save to overwrite the file, or revert to load the new version.`,
+      );
+      return;
+    }
 
     const timeoutMs = this.settings().agentBridge.commandTimeoutSeconds * 1000;
     try {

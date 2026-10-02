@@ -120,6 +120,14 @@ describe('agent bridge (file protocol)', function () {
     assert.strictEqual(fs.readFileSync(path.join(workspace, '.ifc-skills', '.gitignore'), 'utf8'), '*\n');
   });
 
+  it('connecting writes the agent guide stamped with the viewer version', () => {
+    const guide = fs.readFileSync(path.join(bridgeDir, 'SKILL.md'), 'utf8');
+    assert.ok(guide.startsWith('---\nname: ifc-viewer\n'), 'skill frontmatter');
+    const version = vscode.extensions.getExtension(EXTENSION_ID)!.packageJSON.version as string;
+    assert.ok(guide.includes(`IFC Viewer ${version}`), 'version stamp');
+    assert.ok(!guide.includes('{{VERSION}}'), 'no unfilled placeholder');
+  });
+
   it('an "open" command opens the model and acknowledges once it loaded', async () => {
     const inboxFile = drop({ id: 'open-1', op: 'open', model: MODEL });
     const a = await ack('open-1');

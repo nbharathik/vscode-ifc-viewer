@@ -237,6 +237,11 @@ export class SceneController {
     this.batcher.ingest(meshes);
   }
 
+  /** Drop elements' old geometry (replaced or deleted by an edit). */
+  retireElements(expressIDs: Iterable<number>): void {
+    this.batcher.retire(expressIDs);
+  }
+
   /** Apply (or clear) the type/storey filter allowlist. */
   setFilter(ids: Set<number> | null): void {
     this.batcher.setFilter(ids);

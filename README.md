@@ -32,8 +32,11 @@
   progressively, and rendering is GPU-batched.
 - **At home in VS Code.** Follows your light or dark theme and remembers the
   camera and panels.
+- **Edit with IfcOpenShell.** With Python and IfcOpenShell installed, edit
+  properties in place, with undo and save, on a live model.
 - **AI agent pairing.** An agent such as Claude Code with IFC Skills sees your
-  selection and highlights, isolates, and frames elements by GlobalId.
+  selection and highlights, isolates, and frames elements by GlobalId, and can
+  query and edit the live model.
 
 ## Quick start
 
@@ -53,13 +56,38 @@ Requires VS Code 1.96 or later.
 | `H` / `I` / `A` | Hide / isolate / show all |
 | `Esc` | Clear the selection |
 
+## Edit with IfcOpenShell
+
+Click the chip icon in the viewer toolbar to see the engine state, or run
+**IFC Viewer: Set Up IfcOpenShell** to install it into a private environment.
+Then double-click a property value to edit it. Changes stay in memory until you
+save, and Undo, Redo, and Revert work as in any editor. Without IfcOpenShell the
+viewer stays read-only and opens files exactly as fast as before. Details:
+[docs/editing.md](docs/editing.md).
+
 ## Pair with an AI agent
 
 Click **Connect to agent** (the plug icon in the viewer toolbar), then ask
 your agent about the model. Its answers appear as colour-coded highlight
 groups with a legend, and edits to the file reload automatically. Nothing is
-written to your workspace until you connect, and the viewer stays read-only.
-Agent authors can find the file protocol in
+written to your workspace until you connect. Over the file protocol the viewer
+stays read-only; with IfcOpenShell active, the agent's edit tools change the
+live model in memory and never write the file without your Save.
+
+Connecting also writes a short guide for the agent to
+`.ifc-skills/viewer/SKILL.md`, plus a small Python client, `ifc_live.py`, that
+gives any agent or script live access to the open model:
+
+```sh
+python .ifc-skills/viewer/ifc_live.py repl
+python .ifc-skills/viewer/ifc_live.py query "print(len(model.by_type('IfcWall')))"
+```
+
+To make your agent find both, run **IFC Viewer: Add Agent Instructions** (also
+offered when you connect). It adds a few lines to `AGENTS.md`,
+`.github/copilot-instructions.md`, or `CLAUDE.md`, whichever you choose.
+
+Agent authors can find the full file protocol in
 [docs/agent-bridge.md](docs/agent-bridge.md).
 
 ## Development

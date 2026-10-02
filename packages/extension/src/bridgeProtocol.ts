@@ -8,6 +8,53 @@ export const PROTOCOL_VERSION = 1;
 /** Bridge directory inside a workspace folder. */
 export const BRIDGE_DIR = ['.ifc-skills', 'viewer'] as const;
 
+/** Agent guide written into the bridge directory on connect (see media/agent-guide.md). */
+export const GUIDE_FILE = 'SKILL.md';
+/** Line the user can add to their agent's instructions so it reads the guide. */
+export const AGENT_INSTRUCTION =
+  'When .ifc-skills/viewer/SKILL.md exists, read it before showing results in the IFC Viewer.';
+
+/** Python client written next to the guide (see media/ifc_live.py). */
+export const CLIENT_FILE = 'ifc_live.py';
+
+const BLOCK_START = '<!-- ifc-viewer:start -->';
+const BLOCK_END = '<!-- ifc-viewer:end -->';
+
+/** What goes into an agent's instruction file so it finds the guide and the live-model client. */
+export const INSTRUCTION_BLOCK = [
+  BLOCK_START,
+  AGENT_INSTRUCTION,
+  'To query or edit the live model open in the viewer, use the Python client:',
+  '`python .ifc-skills/viewer/ifc_live.py repl` (interactive) or `... query "<code>"` (one shot).',
+  BLOCK_END,
+].join('\n');
+
+/** Instruction files common agents read, relative to the project root. */
+export const INSTRUCTION_TARGETS: readonly { label: string; file: string; detail: string }[] = [
+  { label: 'AGENTS.md', file: 'AGENTS.md', detail: 'Codex, Cursor, Aider and many other agents' },
+  { label: '.github/copilot-instructions.md', file: '.github/copilot-instructions.md', detail: 'GitHub Copilot' },
+  { label: 'CLAUDE.md', file: 'CLAUDE.md', detail: 'Claude Code' },
+];
+
+/**
+ * Add the instruction block to a file's text, or refresh it in place when an
+ * earlier copy is there (so running it twice never duplicates it).
+ */
+export function upsertInstructionBlock(existing: string): string {
+  const start = existing.indexOf(BLOCK_START);
+  const end = existing.indexOf(BLOCK_END);
+  if (start >= 0 && end > start) {
+    return existing.slice(0, start) + INSTRUCTION_BLOCK + existing.slice(end + BLOCK_END.length);
+  }
+  const body = existing.replace(/\s+$/, '');
+  return body === '' ? `${INSTRUCTION_BLOCK}\n` : `${body}\n\n${INSTRUCTION_BLOCK}\n`;
+}
+
+/** Fill the version stamp of the bundled guide template. */
+export function renderAgentGuide(template: string, version: string): string {
+  return template.replace(/\{\{VERSION\}\}/g, version);
+}
+
 export type InboxOp = 'open' | 'reload' | BridgeOp;
 export const INBOX_OPS: readonly InboxOp[] = ['open', 'reload', 'select', 'highlight', 'isolate', 'fit', 'clear'];
 const CLEAR_TARGETS: readonly ClearTarget[] = ['highlight', 'isolate', 'selection', 'all'];
@@ -164,6 +211,12 @@ export interface ModelState {
   /** ISO 8601; null while the first load is still running. */
   loadedAt: string | null;
   isolated: boolean;
+  /** Which engine holds the model data: "ifcopenshell" (live, editable) or "web-ifc" (read-only). */
+  engine: 'ifcopenshell' | 'web-ifc';
+  /** True when edit and query tools work on this model. */
+  editable: boolean;
+  /** True while the model has unsaved edits. */
+  dirty: boolean;
 }
 
 export interface BridgeState {
@@ -188,6 +241,9 @@ export interface PanelSnapshot {
   selection: SelectionInfo | null;
   highlights: HighlightSummary[];
   isolated: boolean;
+  engine?: 'ifcopenshell' | 'web-ifc';
+  editable?: boolean;
+  dirty?: boolean;
 }
 
 export function buildState(
@@ -201,6 +257,9 @@ export function buildState(
     fileMtimeMs: p.fileMtimeMs,
     loadedAt: p.loadedAtMs === null ? null : new Date(p.loadedAtMs).toISOString(),
     isolated: p.isolated,
+    engine: p.engine ?? 'web-ifc',
+    editable: p.editable ?? false,
+    dirty: p.dirty ?? false,
   }));
   return {
     protocol: PROTOCOL_VERSION,

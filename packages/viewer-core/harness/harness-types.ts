@@ -8,6 +8,7 @@ import type {
   ItemProperties,
   LazyCategory,
 } from '../src/engine/types.js';
+import type { Delta, GeometryPatch } from '../src/engine/session.js';
 
 export interface CameraPose {
   position: [number, number, number];
@@ -148,6 +149,14 @@ export interface HarnessHooks {
   cancelLoad(): void;
   /** Drawing-buffer scale; 1 outside interaction. */
   getResolutionScale(): number;
+  /** Apply an edit result (retire/replace geometry, refresh panels). */
+  applyDelta(delta: Delta, patch: GeometryPatch | null): void;
+  /** Attach a fake editing session so the editable properties panel can be tested. */
+  installStubSession(): void;
+  /** Edit operations the stub session received, in order. */
+  getEditLog(): unknown[];
+  /** Number of onModelEdited events since the page loaded. */
+  getEditEvents(): number;
 }
 
 declare global {

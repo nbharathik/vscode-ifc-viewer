@@ -1,12 +1,18 @@
-// CustomReadonlyEditorProvider for *.ifc: hands the webview a URI to stream
-// the file from (bytes fallback for virtual file systems), so model bytes
-// never pass through the extension host. Strict CSP; assets from dist/ only.
-// Panels are keyed by document URI so agent commands reach the right model.
+// Custom editor for *.ifc. The webview streams the file from a URI (bytes
+// fallback for virtual file systems), so model bytes never pass through the
+// extension host, and web-ifc draws it. When the Python model server is
+// available each document also gets a DocumentSession: IfcOpenShell holds the
+// model as ground truth, serves properties, tree and ids, applies edits and
+// saves. Strict CSP; assets from dist/ only. Panels are keyed by document URI
+// so agent commands reach the right model.
 import * as vscode from 'vscode';
+import type { DocumentSession } from './server/documentSession.js';
+import { READ_ONLY_SESSION } from './protocol.js';
 import type {
   AgentStatus,
   BridgeAck,
   BridgeCommand,
+  EditOp,
   HighlightSummary,
   HostToWebview,
   LoadedStats,
@@ -18,8 +24,12 @@ import type {
 
 export const IFC_EDITOR_VIEW_TYPE = 'vscodeIfcViewer.editor';
 
-interface IfcDocument extends vscode.CustomDocument {
+export interface IfcDocument extends vscode.CustomDocument {
   readonly uri: vscode.Uri;
+  /** The editing session, or null when IfcOpenShell is off or unavailable. */
+  readonly session: DocumentSession | null;
+  /** What the webview loads: the file, or a hot-exit backup of it. */
+  readonly loadUri: vscode.Uri;
 }
 
 export type PanelChange = 'opened' | 'closed' | 'loaded' | 'focus' | 'selection' | 'state';
@@ -29,6 +39,15 @@ export interface ProviderHooks {
   agentStatus(uri: vscode.Uri): AgentStatus;
   webviewConfig(): WebviewConfig;
   toggleAgent(uri: vscode.Uri): void;
+  /** The toolbar's engine indicator was clicked. */
+  engineAction(uri: vscode.Uri): void;
+}
+
+/** Creates the editing session for a document (null when the engine setting is web-ifc). */
+export interface SessionHost {
+  create(uri: vscode.Uri, backup: vscode.Uri | undefined): DocumentSession | null;
+  /** The document closed; forget its session. */
+  release(session: DocumentSession): void;
 }
 
 interface Waiter {
@@ -58,7 +77,12 @@ export class ViewerPanel {
   constructor(
     readonly uri: vscode.Uri,
     readonly panel: vscode.WebviewPanel,
+    readonly document: IfcDocument,
   ) {}
+
+  get session(): DocumentSession | null {
+    return this.document.session;
+  }
 
   get key(): string {
     return this.uri.toString();
@@ -171,12 +195,17 @@ export class ViewerPanel {
   }
 }
 
-export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<IfcDocument> {
+export class IfcEditorProvider implements vscode.CustomEditorProvider<IfcDocument> {
   private readonly panels = new Map<string, ViewerPanel>();
+  private readonly documents = new Map<string, IfcDocument>();
   private readonly changeEmitter = new vscode.EventEmitter<{ panel: ViewerPanel; change: PanelChange }>();
   /** Fires when a panel opens, closes, loads, gains focus or reports new state. */
   readonly onDidChangePanel = this.changeEmitter.event;
+  private readonly editEmitter = new vscode.EventEmitter<vscode.CustomDocumentEditEvent<IfcDocument>>();
+  /** Edits push undo entries here; VS Code owns dirty state, undo and redo. */
+  readonly onDidChangeCustomDocument = this.editEmitter.event;
   private hooks: ProviderHooks | null = null;
+  private sessionHost: SessionHost | null = null;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -194,6 +223,7 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
         supportsMultipleEditorsPerDocument: false,
       }),
       provider.changeEmitter,
+      provider.editEmitter,
     );
     return { provider, disposable };
   }
@@ -202,8 +232,93 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
     this.hooks = hooks;
   }
 
-  openCustomDocument(uri: vscode.Uri): IfcDocument {
-    return { uri, dispose: () => undefined };
+  setSessionHost(host: SessionHost): void {
+    this.sessionHost = host;
+  }
+
+  documentFor(uri: vscode.Uri): IfcDocument | undefined {
+    return this.documents.get(uri.toString());
+  }
+
+  openCustomDocument(uri: vscode.Uri, openContext: vscode.CustomDocumentOpenContext): IfcDocument {
+    const backup = openContext.backupId ? vscode.Uri.parse(openContext.backupId) : undefined;
+    const session = this.sessionHost?.create(uri, backup) ?? null;
+    const document: IfcDocument = {
+      uri,
+      session,
+      loadUri: backup ?? uri,
+      dispose: () => {
+        if (this.documents.get(uri.toString()) === document) this.documents.delete(uri.toString());
+        if (session) {
+          this.sessionHost?.release(session);
+          void session.dispose();
+        }
+      },
+    };
+    this.documents.set(uri.toString(), document);
+    if (session) {
+      session.onDidEdit(({ label }) =>
+        this.editEmitter.fire({
+          document,
+          label,
+          undo: async () => void (await session.undo()),
+          redo: async () => void (await session.redo()),
+        }),
+      );
+      void session.start();
+    }
+    return document;
+  }
+
+  // -- save, revert, backup -------------------------------------------------
+
+  async saveCustomDocument(document: IfcDocument): Promise<void> {
+    const session = document.session;
+    if (!session?.ready) return;
+    const saved = await session.save();
+    // Our own write must not look like an outside change to the auto-reloader.
+    // Use VS Code's stat, the value the reloader compares against; the server's
+    // own mtime can differ in the last millisecond.
+    const panel = this.panelFor(document.uri);
+    if (panel) {
+      panel.fileMtimeMs = await vscode.workspace.fs.stat(document.uri).then(
+        (s) => s.mtime,
+        () => saved.mtimeMs,
+      );
+    }
+  }
+
+  async saveCustomDocumentAs(document: IfcDocument, destination: vscode.Uri): Promise<void> {
+    const session = document.session;
+    if (!session?.ready) throw new Error('Saving a copy needs IfcOpenShell, which is not available for this file.');
+    if (destination.scheme !== 'file') throw new Error('Only local files can be saved.');
+    await session.save(destination.fsPath);
+  }
+
+  async revertCustomDocument(document: IfcDocument): Promise<void> {
+    const session = document.session;
+    if (!session?.ready) return;
+    await session.discard();
+    const panel = this.panelFor(document.uri);
+    if (panel) await this.reloadView(panel, true, 120_000);
+  }
+
+  async backupCustomDocument(
+    document: IfcDocument,
+    context: vscode.CustomDocumentBackupContext,
+  ): Promise<vscode.CustomDocumentBackup> {
+    const session = document.session;
+    if (session?.ready) await session.writeBackup(context.destination.fsPath);
+    return {
+      id: context.destination.toString(),
+      delete: async () => {
+        try {
+          await vscode.workspace.fs.delete(context.destination);
+        } catch {
+          // already gone
+        }
+      },
+    };
   }
 
   panelFor(uri: vscode.Uri): ViewerPanel | undefined {
@@ -244,8 +359,23 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
     return panel;
   }
 
-  /** Load the file again; `keepView` keeps camera, selection and agent highlights. */
+  /**
+   * Load the file again; `keepView` keeps camera, selection and agent
+   * highlights. With an editing session the model is re-read from disk too,
+   * which would drop unsaved edits, so that is refused.
+   */
   async reload(panel: ViewerPanel, keepView: boolean, timeoutMs: number): Promise<void> {
+    const session = panel.session;
+    if (session?.ready) {
+      if (session.dirty) {
+        throw new Error(`${panel.fileName} has unsaved changes. Save or revert them first.`);
+      }
+      await session.discard();
+    }
+    await this.reloadView(panel, keepView, timeoutMs);
+  }
+
+  private async reloadView(panel: ViewerPanel, keepView: boolean, timeoutMs: number): Promise<void> {
     panel.reloadInFlight = keepView;
     // Mark the load first so whenLoaded waits for this one, not the last.
     panel.loading = true;
@@ -256,9 +386,24 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
   }
 
   async resolveCustomEditor(document: IfcDocument, webviewPanel: vscode.WebviewPanel): Promise<void> {
-    const panel = new ViewerPanel(document.uri, webviewPanel);
+    const panel = new ViewerPanel(document.uri, webviewPanel, document);
     this.panels.set(panel.key, panel);
+    const session = document.session;
+    const sessionSubs: vscode.Disposable[] = [];
+    if (session) {
+      sessionSubs.push(
+        session.onDidChangeState((state) => {
+          panel.post({ type: 'session', session: state });
+          this.changeEmitter.fire({ panel, change: 'state' });
+        }),
+        session.onDidDelta(({ source, delta, patch }) => {
+          panel.post({ type: 'delta', source, delta, patch });
+          this.changeEmitter.fire({ panel, change: 'state' });
+        }),
+      );
+    }
     webviewPanel.onDidDispose(() => {
+      for (const sub of sessionSubs) sub.dispose();
       panel.dispose();
       // A reopened tab for the same file may already have replaced this one.
       if (this.panels.get(panel.key) === panel) this.panels.delete(panel.key);
@@ -270,9 +415,14 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
     // The document's directory is a resource root so the webview can stream
     // the model file directly (the URL load path).
     const documentDir = vscode.Uri.joinPath(document.uri, '..');
+    const roots = [distUri, documentDir];
+    // A hot-exit backup lives elsewhere and is what gets streamed.
+    if (document.loadUri.toString() !== document.uri.toString()) {
+      roots.push(vscode.Uri.joinPath(document.loadUri, '..'));
+    }
     webviewPanel.webview.options = {
       enableScripts: true,
-      localResourceRoots: [distUri, documentDir],
+      localResourceRoots: roots,
     };
     webviewPanel.webview.html = this.getHtml(webviewPanel.webview, distUri);
 
@@ -295,6 +445,7 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
     switch (message.type) {
       case 'ready':
         this.sendStatus(panel);
+        panel.post({ type: 'session', session: panel.session?.state ?? READ_ONLY_SESSION });
         panel.loading = true;
         panel.loadError = null;
         void this.sendFileUrl(panel);
@@ -339,6 +490,54 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
       case 'selectionResult':
         panel.resolveSelectionRequest(message.requestId, message.selection);
         break;
+      case 'rpc':
+        void this.handleRpc(panel, message);
+        break;
+      case 'engineAction':
+        this.hooks?.engineAction(panel.uri);
+        break;
+    }
+  }
+
+  /** Forward a webview data request to the model server. */
+  private async handleRpc(panel: ViewerPanel, message: Extract<WebviewToHost, { type: 'rpc' }>): Promise<void> {
+    const { id, method, params } = message;
+    try {
+      const session = panel.session;
+      if (!session?.ready) throw new Error('IfcOpenShell is not available for this file.');
+      let result: unknown;
+      switch (method) {
+        case 'properties':
+          result = await session.read('properties', { id: requireInt(params.id) });
+          break;
+        case 'tree':
+          result = await session.read('tree');
+          break;
+        case 'resolveGlobalIds':
+          result = await session.read('resolveGlobalIds', { ids: requireStrings(params.ids) });
+          break;
+        case 'globalIdOf':
+          result = (await session.read<{ globalId: string | null }>('globalIdOf', { id: requireInt(params.id) })).globalId;
+          break;
+        case 'edit': {
+          const edit = await session.edit(requireOps(params.ops), 'user');
+          result = { txn: edit.delta?.txn ?? null };
+          break;
+        }
+        case 'undo':
+          await vscode.commands.executeCommand('undo');
+          result = null;
+          break;
+        case 'redo':
+          await vscode.commands.executeCommand('redo');
+          result = null;
+          break;
+        default:
+          throw new Error(`Unknown request "${String(method)}".`);
+      }
+      panel.post({ type: 'rpcResult', id, result });
+    } catch (err) {
+      panel.post({ type: 'rpcError', id, message: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -352,7 +551,9 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
     try {
       const stat = await vscode.workspace.fs.stat(panel.uri);
       panel.fileMtimeMs = stat.mtime;
-      return stat.size;
+      const loadUri = panel.document.loadUri;
+      if (loadUri.toString() === panel.uri.toString()) return stat.size;
+      return (await vscode.workspace.fs.stat(loadUri)).size;
     } catch {
       return undefined;
     }
@@ -361,7 +562,7 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
   /** Preferred path: send a fetchable URI; the webview streams the bytes. */
   private async sendFileUrl(panel: ViewerPanel): Promise<void> {
     const size = await this.statMtime(panel);
-    const src = panel.panel.webview.asWebviewUri(panel.uri).toString();
+    const src = panel.panel.webview.asWebviewUri(panel.document.loadUri).toString();
     panel.post({
       type: 'load',
       src,
@@ -373,7 +574,7 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
 
   /** Fallback path: read bytes host-side (virtual FS, unfetchable schemes). */
   private async sendFileBytes(panel: ViewerPanel): Promise<void> {
-    const bytes = await vscode.workspace.fs.readFile(panel.uri);
+    const bytes = await vscode.workspace.fs.readFile(panel.document.loadUri);
     // Copy into a standalone ArrayBuffer; VS Code's postMessage structured-clones
     // rather than transfers, but the binary is preserved intact.
     const buffer = bytes.buffer.slice(
@@ -423,6 +624,21 @@ export class IfcEditorProvider implements vscode.CustomReadonlyEditorProvider<If
   </body>
 </html>`;
   }
+}
+
+function requireInt(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw new Error('Expected an integer id.');
+  return value;
+}
+
+function requireStrings(value: unknown): string[] {
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) throw new Error('Expected an array of strings.');
+  return value as string[];
+}
+
+function requireOps(value: unknown): EditOp[] {
+  if (!Array.isArray(value) || value.length === 0) throw new Error('Expected a non-empty list of edit operations.');
+  return value as EditOp[];
 }
 
 function makeNonce(): string {

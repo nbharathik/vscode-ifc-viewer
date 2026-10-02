@@ -2,12 +2,22 @@
 // viewer-core and bridges the typed protocol to the extension host. This file
 // may import @vscode-ifc-viewer/core (which brings Three.js + web-ifc) but never
 // imports `three`/`web-ifc` directly - the layer ban only forbids direct imports.
-import { createViewer, CancelledError } from '@vscode-ifc-viewer/core';
-import type { ToolbarButtonHandle, ViewerViewState } from '@vscode-ifc-viewer/core';
+import { createViewer, CancelledError, READ_ONLY_SESSION } from '@vscode-ifc-viewer/core';
+import type {
+  EditOp,
+  GlobalIdResolution,
+  ItemProperties,
+  ModelSession,
+  SessionState,
+  SpatialNode,
+  ToolbarButtonHandle,
+  ViewerViewState,
+} from '@vscode-ifc-viewer/core';
 import type {
   AgentStatus,
   BridgeCommand,
   HostToWebview,
+  RpcMethod,
   WebviewConfig,
   WebviewToHost,
 } from '../protocol.js';
@@ -108,11 +118,112 @@ function restoreViewState(fileName: string): void {
   }
 }
 
+// -- editing session ----------------------------------------------------------
+// The Python model server (IfcOpenShell) owns the model data. This is the
+// webview's end of that: requests go to the host, which forwards them.
+class RemoteSession implements ModelSession {
+  private nextId = 1;
+  private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
+
+  private call<T>(method: RpcMethod, params: Record<string, unknown> = {}): Promise<T> {
+    const id = this.nextId++;
+    return new Promise<T>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject });
+      post({ type: 'rpc', id, method, params });
+    });
+  }
+
+  settle(id: number, result: { ok: true; value: unknown } | { ok: false; message: string }): void {
+    const entry = this.pending.get(id);
+    if (!entry) return;
+    this.pending.delete(id);
+    if (result.ok) entry.resolve(result.value);
+    else entry.reject(new Error(result.message));
+  }
+
+  getProperties(expressID: number): Promise<ItemProperties> {
+    return this.call('properties', { id: expressID });
+  }
+
+  getTree(): Promise<SpatialNode> {
+    return this.call('tree');
+  }
+
+  resolveGlobalIds(globalIds: readonly string[]): Promise<GlobalIdResolution> {
+    return this.call('resolveGlobalIds', { ids: [...globalIds] });
+  }
+
+  globalIdOf(expressID: number): Promise<string | null> {
+    return this.call('globalIdOf', { id: expressID });
+  }
+
+  async edit(ops: EditOp[]): Promise<void> {
+    await this.call('edit', { ops });
+  }
+
+  async undo(): Promise<void> {
+    await this.call('undo');
+  }
+
+  async redo(): Promise<void> {
+    await this.call('redo');
+  }
+}
+
+const remoteSession = new RemoteSession();
+viewer.setSession(remoteSession, READ_ONLY_SESSION);
+
+const CHIP_ICON =
+  '<svg viewBox="0 0 16 16" aria-hidden="true">' +
+  '<rect x="4" y="4" width="8" height="8" rx="1" fill="none" stroke="currentColor" stroke-width="1.2"/>' +
+  '<path d="M6.5 1.5v2.5M9.5 1.5v2.5M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>' +
+  '</svg>';
+
+/** Created on the first session message, so a plain harness adds no button. */
+let engineButton: ToolbarButtonHandle | null = null;
+
+function engineLabel(state: SessionState): string {
+  switch (state.state) {
+    case 'ready':
+      return 'Editing engine: IfcOpenShell is ready. Properties and edits come from the live model. Click for details.';
+    case 'starting':
+      return 'Starting IfcOpenShell. The model is already viewable; editing becomes available shortly.';
+    case 'unavailable':
+      return `Read-only (web-ifc). ${state.detail ?? 'IfcOpenShell is not available.'} Click to set it up.`;
+    default:
+      return 'Read-only (web-ifc). IfcOpenShell is turned off. Click for options.';
+  }
+}
+
+function renderEngineButton(state: SessionState): void {
+  engineButton ??= viewer.addToolbarButton({
+    id: 'btn-engine',
+    label: engineLabel(state),
+    icon: CHIP_ICON,
+    onClick: () => post({ type: 'engineAction' }),
+  });
+  engineButton?.setLabel(engineLabel(state));
+  engineButton?.setActive(state.state === 'ready');
+}
+
+/** Highlight group for elements an agent changed, so edits are easy to review. */
+const AGENT_EDIT_LABEL = 'Changed by agent';
+const AGENT_EDIT_COLOR = '#ffb300';
+const agentChanged = new Set<number>();
+
+function markAgentChanges(delta: { changed: { id: number }[]; removed: number[] }): void {
+  for (const id of delta.removed) agentChanged.delete(id);
+  for (const change of delta.changed) agentChanged.add(change.id);
+  if (agentChanged.size > 0 && config.highlightAgentEdits) {
+    viewer.setHighlight(AGENT_EDIT_LABEL, [...agentChanged], AGENT_EDIT_COLOR);
+  }
+}
+
 // -- agent bridge -------------------------------------------------------------
 // Everything here is inert until the host reports a connection: no selection
 // messages, no GlobalId index, no state reports.
 let agent: AgentStatus = { available: false, connected: false };
-let config: WebviewConfig = { showLegend: true, revealHiddenCategories: true };
+let config: WebviewConfig = { showLegend: true, revealHiddenCategories: true, highlightAgentEdits: true };
 
 /** Agent highlight groups and isolate, kept by GlobalId so a reload can re-apply them. */
 const agentHighlights = new Map<string, { globalIds: string[]; color: string }>();
@@ -262,6 +373,7 @@ async function reapplyAgentState(selectedGlobalId: string | null): Promise<void>
 let pendingRestore: { view: ViewerViewState | null; selectedGlobalId: string | null } | null = null;
 
 async function runLoad({ source, fileName, isUrl, reload }: LoadRequest): Promise<void> {
+  agentChanged.clear();
   if (!reload) {
     pendingRestore = null;
     agentHighlights.clear();
@@ -381,6 +493,20 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
     case 'config':
       config = msg.config;
       viewer.setHighlightLegendEnabled(config.showLegend);
+      break;
+    case 'session':
+      viewer.setSession(remoteSession, msg.session);
+      renderEngineButton(msg.session);
+      break;
+    case 'rpcResult':
+      remoteSession.settle(msg.id, { ok: true, value: msg.result });
+      break;
+    case 'rpcError':
+      remoteSession.settle(msg.id, { ok: false, message: msg.message });
+      break;
+    case 'delta':
+      viewer.applyDelta(msg.delta, msg.patch);
+      if (msg.source === 'agent') markAgentChanges(msg.delta);
       break;
     case 'getSelection': {
       const expressID = viewer.getSelection();

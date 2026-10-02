@@ -14,6 +14,9 @@ import type { ToolbarButtonHandle, ToolbarButtonSpec } from './panels/toolbar.js
 import { PerfHud } from './panels/perfHud.js';
 import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
+import { READ_ONLY_SESSION } from './engine/session.js';
+import type { Delta, EditOp, GeometryPatch, ModelSession, SessionState } from './engine/session.js';
+import { unpackPatch } from './engine/patch.js';
 import { buildSearchIndex, filterElementIDs } from './search.js';
 import type { SearchIndex } from './search.js';
 import { normalizeColor } from './scene/highlights.js';
@@ -34,6 +37,8 @@ import type {
 } from './engine/types.js';
 
 export * from './engine/types.js';
+export * from './engine/session.js';
+export { unpackPatch } from './engine/patch.js';
 export type { CameraPose, ProjectionMode, SceneInfo, SectionAxis } from './scene/scene.js';
 export type { StandardView } from './scene/controls.js';
 export type { HighlightInfo } from './scene/highlights.js';
@@ -119,6 +124,23 @@ export interface Viewer {
   /** Search index over the spatial tree; built once per load, null before one. */
   getSearchIndex(): SearchIndex | null;
   getProperties(expressID: number): Promise<ItemProperties | null>;
+  /**
+   * Attach (or detach, with null) the editing session that owns the model
+   * data. While its state is `ready`, properties, ids and the tree come from
+   * it and edits are possible; otherwise the viewer is read-only.
+   */
+  setSession(session: ModelSession | null, state: SessionState): void;
+  getSessionState(): SessionState;
+  /** Subscribe to session state changes; returns an unsubscribe function. */
+  onSessionChange(listener: () => void): () => void;
+  /** Apply an edit result: replace changed geometry, refresh the tree and panels. */
+  applyDelta(delta: Delta, patch: GeometryPatch | null): void;
+  /** Subscribe to applied edits; returns an unsubscribe function. */
+  onModelEdited(listener: (delta: Delta) => void): () => void;
+  /** Apply typed edit operations through the session (rejects when read-only). */
+  editModel(ops: EditOp[]): Promise<void>;
+  undoEdit(): Promise<void>;
+  redoEdit(): Promise<void>;
   /**
    * Map IFC GlobalIds (IfcProduct and IfcProject instances) to expressIDs in
    * the loaded model. Without a model every id is missing. Rejects when the
@@ -286,6 +308,12 @@ class ViewerImpl implements Viewer {
   private readonly highlightListeners = new Set<() => void>();
   private readonly visibilityListeners = new Set<() => void>();
   private isolated = false;
+  private session: ModelSession | null = null;
+  private sessionState: SessionState = READ_ONLY_SESSION;
+  private readonly sessionListeners = new Set<() => void>();
+  private readonly editedListeners = new Set<(delta: Delta) => void>();
+  /** Edits that arrived while a model was still loading; applied once it is on screen. */
+  private pendingDeltas: { delta: Delta; patch: GeometryPatch | null }[] = [];
 
   constructor(
     private readonly container: HTMLElement,
@@ -490,6 +518,7 @@ class ViewerImpl implements Viewer {
       this.loadingOverlay.hide();
       this.ready = true;
       this.loading = false;
+      for (const queued of this.pendingDeltas.splice(0)) this.applyDelta(queued.delta, queued.patch);
       for (const listener of this.modelLoadedListeners) listener();
       return {
         modelID: meta.modelID,
@@ -541,8 +570,21 @@ class ViewerImpl implements Viewer {
     return this.searchIndex;
   }
 
+  /** The session that answers data requests, when it is up. */
+  private liveSession(): ModelSession | null {
+    return this.session && this.sessionState.state === 'ready' ? this.session : null;
+  }
+
   async getProperties(expressID: number): Promise<ItemProperties | null> {
     if (this.currentModelID === null || !this.engine) return null;
+    const session = this.liveSession();
+    if (session) {
+      try {
+        return await session.getProperties(expressID);
+      } catch {
+        // fall back to the render engine's read of the file
+      }
+    }
     try {
       return await this.engine.getItemProperties(this.currentModelID, expressID);
     } catch {
@@ -555,7 +597,16 @@ class ViewerImpl implements Viewer {
       return { found: [], missing: [...new Set(globalIds)] };
     }
     const token = this.loadToken;
-    const result = await this.engine.resolveGlobalIds(this.currentModelID, globalIds);
+    const session = this.liveSession();
+    let result: GlobalIdResolution | null = null;
+    if (session) {
+      try {
+        result = await session.resolveGlobalIds(globalIds);
+      } catch {
+        result = null;
+      }
+    }
+    result ??= await this.engine.resolveGlobalIds(this.currentModelID, globalIds);
     // expressIDs are per model; a reload in between makes them meaningless.
     if (token !== this.loadToken) throw new Error('The model was reloaded during the lookup.');
     return result;
@@ -565,10 +616,135 @@ class ViewerImpl implements Viewer {
     if (this.currentModelID === null || !this.engine) return null;
     const token = this.loadToken;
     try {
-      const globalId = await this.engine.globalIdOf(this.currentModelID, expressID);
+      const session = this.liveSession();
+      let globalId: string | null | undefined;
+      if (session) {
+        try {
+          globalId = await session.globalIdOf(expressID);
+        } catch {
+          globalId = undefined;
+        }
+      }
+      globalId ??= await this.engine.globalIdOf(this.currentModelID, expressID);
       return token === this.loadToken ? globalId : null;
     } catch {
       return null;
+    }
+  }
+
+  // -- editing session ----------------------------------------------------
+  setSession(session: ModelSession | null, state: SessionState): void {
+    this.session = session;
+    this.sessionState = state;
+    for (const listener of this.sessionListeners) listener();
+  }
+
+  getSessionState(): SessionState {
+    return this.sessionState;
+  }
+
+  onSessionChange(listener: () => void): () => void {
+    this.sessionListeners.add(listener);
+    return () => this.sessionListeners.delete(listener);
+  }
+
+  onModelEdited(listener: (delta: Delta) => void): () => void {
+    this.editedListeners.add(listener);
+    return () => this.editedListeners.delete(listener);
+  }
+
+  // Properties panel hooks (structural PropertiesSource members).
+  canEdit(): boolean {
+    return this.liveSession() !== null && this.sessionState.canEdit;
+  }
+
+  editAttribute(expressID: number, name: string, value: string | null): Promise<void> {
+    return this.editModel([{ op: 'setAttribute', id: expressID, name, value }]);
+  }
+
+  editProperty(
+    expressID: number,
+    edit: { pset: string; psetId: number; kind: 'pset' | 'qto'; name: string; value: string | number | boolean | null },
+  ): Promise<void> {
+    return this.editModel([
+      { op: 'setProperty', id: expressID, pset: edit.pset, psetId: edit.psetId, kind: edit.kind, name: edit.name, value: edit.value },
+    ]);
+  }
+
+  onModelChanged(listener: () => void): () => void {
+    const offEdited = this.onModelEdited(() => listener());
+    const offSession = this.onSessionChange(listener);
+    return () => {
+      offEdited();
+      offSession();
+    };
+  }
+
+  private requireEditable(): ModelSession {
+    const session = this.liveSession();
+    if (!session || !this.sessionState.canEdit) {
+      throw new Error('Editing needs IfcOpenShell, which is not available for this file.');
+    }
+    return session;
+  }
+
+  editModel(ops: EditOp[]): Promise<void> {
+    try {
+      return this.requireEditable().edit(ops);
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  undoEdit(): Promise<void> {
+    try {
+      return this.requireEditable().undo();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  redoEdit(): Promise<void> {
+    try {
+      return this.requireEditable().redo();
+    } catch (err) {
+      return Promise.reject(err);
+    }
+  }
+
+  applyDelta(delta: Delta, patch: GeometryPatch | null): void {
+    if (!this.ready) {
+      this.pendingDeltas.push({ delta, patch });
+      return;
+    }
+    const retire = new Set<number>(delta.removed);
+    for (const change of delta.changed) if (change.geometry) retire.add(change.id);
+    if (retire.size > 0) this.scene.retireElements(retire);
+    if (this.selection !== null && delta.removed.includes(this.selection)) this.clearSelection();
+    if (patch) {
+      const meshes = unpackPatch(patch);
+      if (meshes.length > 0) this.scene.addMeshes(meshes);
+    }
+    this.scene.render();
+    if (delta.treeDirty) void this.refreshTree();
+    for (const listener of this.editedListeners) listener(delta);
+  }
+
+  /** Re-read the spatial tree from the session after containment or hierarchy edits. */
+  private async refreshTree(): Promise<void> {
+    const session = this.liveSession();
+    if (!session) return;
+    const token = this.loadToken;
+    try {
+      const tree = await session.getTree();
+      if (token !== this.loadToken) return;
+      this.cachedTree = tree;
+      this.nodeIndex = null;
+      this.searchIndex = null;
+      // The tree panel and filter flyout rebuild from the new structure.
+      for (const listener of this.modelLoadedListeners) listener();
+    } catch {
+      // keep the previous tree
     }
   }
 

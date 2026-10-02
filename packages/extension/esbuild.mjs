@@ -1,7 +1,7 @@
 // esbuild bundler for the extension host (CJS, node) and the webview script
 // (IIFE, browser) which imports the bundled viewer-core.
 import { build, context } from 'esbuild';
-import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, readdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
@@ -19,6 +19,18 @@ function copyWasm() {
     resolve(repoRoot, 'node_modules/web-ifc/web-ifc.wasm'),
     join(root, 'dist/web-ifc.wasm'),
   );
+}
+
+// The Python model server ships as plain source next to the bundles; the
+// extension starts it with `python -m ifc_viewer_server` from dist/server.
+function copyServer() {
+  const from = resolve(repoRoot, 'packages/model-server/ifc_viewer_server');
+  const to = join(root, 'dist/server/ifc_viewer_server');
+  rmSync(to, { recursive: true, force: true });
+  mkdirSync(to, { recursive: true });
+  for (const name of readdirSync(from)) {
+    if (name.endsWith('.py')) copyFileSync(join(from, name), join(to, name));
+  }
 }
 
 /** @type {import('esbuild').BuildOptions} */
@@ -78,8 +90,10 @@ if (watch) {
     await ctx.watch();
   }
   copyWasm();
+  copyServer();
   console.log('esbuild watching…');
 } else {
   await Promise.all(configs.map((cfg) => build(cfg)));
   copyWasm();
+  copyServer();
 }

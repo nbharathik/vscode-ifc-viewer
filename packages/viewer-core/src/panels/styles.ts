@@ -195,6 +195,22 @@ const CSS = `
 }
 .ifc-table td.ifc-val { font-weight: 500; }
 .ifc-null { opacity: 0.5; }
+.ifc-table td.ifc-val--editable { cursor: text; }
+.ifc-table td.ifc-val--editable:hover {
+  background: color-mix(in srgb, var(--vscode-focusBorder, #3794ff) 14%, transparent);
+}
+.ifc-table td.ifc-edit-failed { outline: 1px solid var(--vscode-inputValidation-errorBorder, #be1100); }
+.ifc-edit-input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  color: var(--vscode-input-foreground, inherit);
+  background: var(--vscode-input-background, transparent);
+  border: 1px solid var(--vscode-focusBorder, #3794ff);
+  border-radius: 2px;
+  padding: 1px 4px;
+}
+.ifc-edit-invalid { border-color: var(--vscode-inputValidation-errorBorder, #be1100); }
 
 /* Spatial tree */
 .ifc-tree-node { user-select: none; }

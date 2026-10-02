@@ -1,0 +1,9 @@
+[project]
+name = "ifc-viewer-server"
+version = "1.4.0"
+description = "IfcOpenShell model server for the IFC Viewer VS Code extension"
+requires-python = ">=3.10"
+dependencies = ["ifcopenshell>=0.8.4,<0.9", "numpy"]
+
+[tool.setuptools]
+packages = ["ifc_viewer_server"]

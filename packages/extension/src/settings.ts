@@ -3,9 +3,17 @@
 
 export type AutoConnect = 'never' | 'remember' | 'always';
 export type AutoReloadMode = 'off' | 'whenConnected' | 'always';
+export type EngineMode = 'auto' | 'web-ifc' | 'ifcopenshell';
 
 export interface ExtensionSettings {
+  engine: {
+    mode: EngineMode;
+    python: string;
+    allowScripts: boolean;
+    highlightAgentEdits: boolean;
+  };
   agentBridge: {
+    mcpTools: boolean;
     enabled: boolean;
     autoConnect: AutoConnect;
     heartbeatSeconds: number;
@@ -29,7 +37,14 @@ export interface ExtensionSettings {
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
+  engine: {
+    mode: 'auto',
+    python: '',
+    allowScripts: true,
+    highlightAgentEdits: true,
+  },
   agentBridge: {
+    mcpTools: true,
     enabled: true,
     autoConnect: 'remember',
     heartbeatSeconds: 10,
@@ -87,8 +102,16 @@ function oneOf<T extends string>(read: SettingReader, key: string, allowed: read
 /** Settings from a reader, with wrong types replaced by defaults and numbers clamped. */
 export function readSettings(read: SettingReader): ExtensionSettings {
   const d = DEFAULT_SETTINGS;
+  const python = read('engine.python');
   return {
+    engine: {
+      mode: oneOf(read, 'engine.mode', ['auto', 'web-ifc', 'ifcopenshell'], d.engine.mode),
+      python: typeof python === 'string' ? python.trim() : d.engine.python,
+      allowScripts: bool(read, 'engine.allowScripts', d.engine.allowScripts),
+      highlightAgentEdits: bool(read, 'engine.highlightAgentEdits', d.engine.highlightAgentEdits),
+    },
     agentBridge: {
+      mcpTools: bool(read, 'agentBridge.mcpTools', d.agentBridge.mcpTools),
       enabled: bool(read, 'agentBridge.enabled', d.agentBridge.enabled),
       autoConnect: oneOf(read, 'agentBridge.autoConnect', ['never', 'remember', 'always'], d.agentBridge.autoConnect),
       heartbeatSeconds: num(read, 'agentBridge.heartbeatSeconds', d.agentBridge.heartbeatSeconds),

@@ -14,9 +14,21 @@ folder is connected the viewer maintains:
 
 ```
 <workspace folder>/.ifc-skills/viewer/
+  SKILL.md          agent guide written by the viewer on connect
+  mcp-shim.mjs      stdio shim for the live model tools (see below)
+  server.json       where the tool server listens right now (url, token)
   state.json        written by the viewer
   inbox/<id>.json   commands written by the agent
   outbox/<id>.json  answers written by the viewer
+```
+
+`SKILL.md` is a short, agent-facing summary of this page, stamped with the
+viewer version and rewritten on every connect. To have an agent read it, add
+this line to its instructions (for example `CLAUDE.md`); the viewer offers to
+copy it the first time you connect a workspace:
+
+```
+When .ifc-skills/viewer/SKILL.md exists, read it before showing results in the IFC Viewer.
 ```
 
 Agents should not create this folder themselves. The viewer is live when
@@ -39,7 +51,8 @@ Replaced atomically; written on connect, on every heartbeat, and within
   "heartbeatSeconds": 10,
   "models": [
     { "path": "models/house.ifc", "active": true, "fileMtimeMs": 1790000000000,
-      "loadedAt": "2026-09-25T11:59:40.000Z", "isolated": false }
+      "loadedAt": "2026-09-25T11:59:40.000Z", "isolated": false,
+      "engine": "ifcopenshell", "editable": true, "dirty": false }
   ],
   "selection": [
     { "model": "models/house.ifc", "globalId": "2O2Fr$t4X7Zf8NOew3FLOH",
@@ -53,7 +66,10 @@ Replaced atomically; written on connect, on every heartbeat, and within
 ```
 
 Paths are relative to the workspace folder with forward slashes. `loadedAt`
-is `null` while a model is still loading.
+is `null` while a model is still loading. `engine` is `ifcopenshell` when the
+viewer holds the model in IfcOpenShell (live, editable) and `web-ifc` when it is
+read-only; `editable` says whether the edit and query tools work, and `dirty`
+whether the model has unsaved edits (see [Live model tools](#live-model-tools)).
 
 ## Commands
 
@@ -112,11 +128,76 @@ While connected, a model reloads when its file changes on disk and keeps its
 camera, selection, and highlights, matched again by GlobalId. Write IFC
 files through a temporary file and a rename, and keep GlobalIds stable.
 
+## Live model: Python client
+
+When Python with IfcOpenShell is available the viewer keeps each open model in
+IfcOpenShell (see [editing.md](editing.md)). While connected it writes
+`.ifc-skills/viewer/ifc_live.py`, a dependency-free client (Python 3.8 or newer)
+that runs code against that live model. Any agent that can run a command, and
+your own scripts, can use it with no registration:
+
+```sh
+python .ifc-skills/viewer/ifc_live.py state
+python .ifc-skills/viewer/ifc_live.py query "print(len(model.by_type('IfcWall')))"
+python .ifc-skills/viewer/ifc_live.py edit '[{"op":"setAttribute","globalId":"...","name":"Name","value":"X"}]'
+python .ifc-skills/viewer/ifc_live.py repl      # interactive, variables persist
+```
+
+```python
+import sys; sys.path.insert(0, ".ifc-skills/viewer")
+from ifc_live import connect
+live = connect()
+print(live.query("print(model.schema)").output)
+```
+
+Scripts see `model` (an `ifcopenshell.file`), `ifcopenshell`, `api` and
+`element_util`. **IFC Viewer: Add Agent Instructions** (also offered when you
+connect) adds the lines that point an agent at this to `AGENTS.md`,
+`.github/copilot-instructions.md`, or `CLAUDE.md`.
+
+## Live model tools (MCP)
+
+The same live model is also served as Model Context Protocol tools, for agents
+that prefer them. They act on the very model the user sees, so there is no file
+round trip and no reload.
+
+The tool server listens on a loopback port that changes every session, behind a
+bearer token. `server.json` holds the current `url` and `token`, and
+`mcp-shim.mjs` is a dependency-free stdio shim (Node 18 or newer) that re-reads
+`server.json` on every message and forwards it. Register the shim once; it keeps
+working across sessions:
+
+```json
+{ "mcpServers": { "ifc-viewer": { "command": "node", "args": [".ifc-skills/viewer/mcp-shim.mjs"] } } }
+```
+
+When the viewer is not connected the shim still starts, lists no tools, and
+tells the agent to click the plug icon.
+
+| Tool | Effect |
+| --- | --- |
+| `get_state` | The same data as `state.json`. |
+| `open`, `reload`, `select`, `highlight`, `isolate`, `fit`, `clear` | The viewer ops above, validated the same way. |
+| `query` | Run a Python script against the live model (`model`, `ifcopenshell`, `api`, `element_util`). Edits it makes become one undoable change. |
+| `edit` | Typed edits: `setAttribute`, `setProperty`, `removePset`, `deleteProduct`, `setPlacement`, `assignContainer`, `assignType`, `createProduct`. All apply or none do. |
+| `save` | Ask the user to write unsaved changes to disk. A modal prompt; the user may decline. |
+
+Edits change the model in memory: the viewer updates immediately, highlights
+the changed elements as the group "Changed by agent", and shows the file as
+unsaved. They reach disk only when the user saves, and each can be undone with
+the editor's Undo. `reload` is refused while a model has unsaved changes.
+
 ## Safety
 
-The viewer stays read-only. Commands cannot change IFC files, run code, or
-use the network. Model paths cannot leave the workspace folder, including
-through links, and command sizes and ages are bounded by settings.
+The file protocol cannot change IFC files, run code, or use the network. Model
+paths cannot leave the workspace folder, including through links, and command
+sizes and ages are bounded by settings.
+
+The live tools can change the in-memory model and run Python (`query`), so they
+are limited: loopback only, a random token per session, no browser access
+(requests with an `Origin` header are refused), trusted workspaces only, and
+scripts can be turned off with `ifcViewer.engine.allowScripts`. Nothing is
+written to disk without the user saving.
 
 ## Minimal client (Python)
 

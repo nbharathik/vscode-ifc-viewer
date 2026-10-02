@@ -14,6 +14,40 @@ export interface PropertiesSource {
   /** Panel visibility, driven by the header collapse and edge show buttons. */
   arePropertiesVisible(): boolean;
   setPropertiesVisible(visible: boolean): void;
+  /** True while an editing session is up; value cells then accept edits. */
+  canEdit?(): boolean;
+  editAttribute?(expressID: number, name: string, value: string | null): Promise<void>;
+  editProperty?(expressID: number, edit: PropertyEdit): Promise<void>;
+  /** Re-render when the model was edited or the session changed. */
+  onModelChanged?(listener: () => void): () => void;
+}
+
+export interface PropertyEdit {
+  pset: string;
+  psetId: number;
+  kind: 'pset' | 'qto';
+  name: string;
+  value: string | number | boolean | null;
+}
+
+/** Where a table's rows live, so an edit knows what to change. */
+type EditTarget = { kind: 'attr' } | { kind: 'pset'; pset: IfcPropertySet };
+
+/** Parse typed text back into the value's original type; undefined when it does not fit. */
+export function parseEdited(
+  text: string,
+  original: IfcProperty['value'],
+): string | number | boolean | null | undefined {
+  if (typeof original === 'boolean') {
+    const t = text.trim().toLowerCase();
+    return t === 'true' ? true : t === 'false' ? false : undefined;
+  }
+  if (typeof original === 'number') {
+    if (text.trim() === '') return undefined;
+    const n = Number(text);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return text === '' && original === null ? null : text;
 }
 
 /** Header collapse chevron (points into the edge the panel leaves through). */
@@ -45,6 +79,8 @@ export class PropertiesPanel {
   private renderSeq = 0;
   private searchTimer: number | null = null;
   private hasContent = false;
+  private currentId: number | null = null;
+  private readonly unsubscribeModel: (() => void) | undefined;
 
   constructor(
     container: HTMLElement,
@@ -125,7 +161,13 @@ export class PropertiesPanel {
 
     void this.render(this.source.getSelection());
     this.unsubscribe = this.source.onSelectionChange((id) => void this.render(id));
+    this.unsubscribeModel = this.source.onModelChanged?.(() => {
+      if (this.currentId !== null && !this.editing) void this.render(this.currentId);
+    });
   }
+
+  /** True while a value cell is open for typing; re-rendering then would discard it. */
+  private editing = false;
 
   private scheduleFilter(): void {
     if (this.searchTimer !== null) window.clearTimeout(this.searchTimer);
@@ -170,6 +212,8 @@ export class PropertiesPanel {
   private async render(expressID: number | null): Promise<void> {
     const seq = ++this.renderSeq;
     const doc = this.root.ownerDocument;
+    this.currentId = expressID;
+    this.editing = false;
 
     if (expressID === null) {
       this.body.replaceChildren();
@@ -202,7 +246,7 @@ export class PropertiesPanel {
 
     this.body.appendChild(this.renderAttributes(props));
     for (const pset of props.psets) {
-      this.body.appendChild(this.renderPset(pset));
+      this.body.appendChild(this.renderPset(pset, props.expressID));
     }
     this.hasContent = true;
     // Keep the active filter applied to the freshly rendered rows.
@@ -222,11 +266,11 @@ export class PropertiesPanel {
     title.appendChild(type);
     section.appendChild(title);
 
-    section.appendChild(this.renderTable(props.attributes, 'attr'));
+    section.appendChild(this.renderTable(props.attributes, 'attr', { kind: 'attr' }, props.expressID));
     return section;
   }
 
-  private renderPset(pset: IfcPropertySet): HTMLElement {
+  private renderPset(pset: IfcPropertySet, ownerId: number): HTMLElement {
     const doc = this.root.ownerDocument;
     const section = doc.createElement('div');
     section.className = 'ifc-section';
@@ -249,12 +293,21 @@ export class PropertiesPanel {
       empty.textContent = 'No properties.';
       section.appendChild(empty);
     } else {
-      section.appendChild(this.renderTable(pset.properties, `pset:${pset.name}`));
+      section.appendChild(this.renderTable(pset.properties, `pset:${pset.name}`, { kind: 'pset', pset }, ownerId));
     }
     return section;
   }
 
-  private renderTable(rows: IfcProperty[], scope: string): HTMLElement {
+  /** Can this row be edited? Never GlobalId; only plain scalars. */
+  private isEditable(row: IfcProperty, target: EditTarget): boolean {
+    if (!this.source.canEdit?.()) return false;
+    if (target.kind === 'attr') {
+      return row.name !== 'GlobalId' && (typeof row.value === 'string' || row.value === null);
+    }
+    return row.value === null || ['string', 'number', 'boolean'].includes(typeof row.value);
+  }
+
+  private renderTable(rows: IfcProperty[], scope: string, target: EditTarget, ownerId: number): HTMLElement {
     const doc = this.root.ownerDocument;
     const table = doc.createElement('table');
     table.className = 'ifc-table';
@@ -269,15 +322,95 @@ export class PropertiesPanel {
       const { text, isNull } = formatValue(row.value);
       val.textContent = text;
       if (isNull) val.classList.add('ifc-null');
+      if (this.isEditable(row, target)) {
+        val.classList.add('ifc-val--editable');
+        val.title = 'Double-click to edit';
+        val.addEventListener('dblclick', () => this.beginEdit(val, row, target, ownerId));
+      }
       tr.append(key, val);
       table.appendChild(tr);
     }
     return table;
   }
 
+  /** Swap a value cell for an input; Enter commits, Escape or blur cancels. */
+  private beginEdit(cell: HTMLElement, row: IfcProperty, target: EditTarget, ownerId: number): void {
+    if (this.editing) return;
+    this.editing = true;
+    const doc = this.root.ownerDocument;
+    const input = doc.createElement('input');
+    input.type = 'text';
+    input.className = 'ifc-edit-input';
+    input.setAttribute('data-testid', 'prop-edit-input');
+    input.value = row.value === null || row.value === undefined ? '' : String(row.value);
+    cell.replaceChildren(input);
+    input.focus();
+    input.select();
+
+    let finished = false;
+    const restore = (): void => {
+      if (finished) return;
+      finished = true;
+      this.editing = false;
+      const { text, isNull } = formatValue(row.value);
+      cell.textContent = text;
+      cell.classList.toggle('ifc-null', isNull);
+    };
+    const commit = (): void => {
+      if (finished) return;
+      const parsed = parseEdited(input.value, row.value);
+      if (parsed === undefined) {
+        input.classList.add('ifc-edit-invalid');
+        input.title = typeof row.value === 'boolean' ? 'Enter true or false' : 'Enter a number';
+        return;
+      }
+      if (parsed === row.value) {
+        restore();
+        return;
+      }
+      finished = true;
+      input.disabled = true;
+      const done =
+        target.kind === 'attr'
+          ? this.source.editAttribute?.(ownerId, row.name, parsed as string | null)
+          : this.source.editProperty?.(ownerId, {
+              pset: target.pset.name,
+              psetId: target.pset.expressID,
+              kind: target.pset.kind,
+              name: row.name,
+              value: parsed,
+            });
+      void (done ?? Promise.reject(new Error('Editing is not available.')))
+        .then(() => {
+          this.editing = false;
+          // The model-edited event re-renders; this covers a no-op edit.
+          if (this.currentId === ownerId) void this.render(ownerId);
+        })
+        .catch((err: unknown) => {
+          finished = false;
+          this.editing = false;
+          cell.title = err instanceof Error ? err.message : String(err);
+          restore();
+          cell.classList.add('ifc-edit-failed');
+        });
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        commit();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        restore();
+      }
+    });
+    input.addEventListener('blur', () => restore());
+  }
+
   dispose(): void {
     if (this.searchTimer !== null) window.clearTimeout(this.searchTimer);
     this.unsubscribe();
+    this.unsubscribeModel?.();
     this.railBtn.remove();
     this.root.remove();
   }

@@ -1,10 +1,13 @@
 // Extension entry: registers the custom editor, the commands, the agent
-// bridge and auto-reload, and exposes a small API (onDidLoadModel) that
-// reports each loaded model back so the host tests can assert round-trips.
+// bridge, the IfcOpenShell engine and auto-reload, and exposes a small API
+// (onDidLoadModel) that reports each loaded model back so the host tests can
+// assert round-trips.
 import * as vscode from 'vscode';
 import { IfcEditorProvider } from './ifcEditorProvider.js';
 import { AgentBridge } from './bridge.js';
 import { AutoReloader } from './autoReload.js';
+import { EngineController } from './engine.js';
+import type { DocumentSession } from './server/documentSession.js';
 import { readSettings } from './settings.js';
 import type { ExtensionSettings } from './settings.js';
 import type { LoadedStats } from './protocol.js';
@@ -13,9 +16,14 @@ export interface IfcViewerApi {
   readonly onDidLoadModel: vscode.Event<LoadedStats>;
   /** The most recently loaded model's stats (test convenience). */
   getLastLoaded(): LoadedStats | undefined;
+  /** The engine controller (test convenience). */
+  readonly engine: EngineController;
+  /** The editing session of an open document, if it has one (test convenience). */
+  sessionFor(uri: vscode.Uri): DocumentSession | null;
 }
 
 let bridge: AgentBridge | undefined;
+let engineController: EngineController | undefined;
 
 function loadSettings(): ExtensionSettings {
   const config = vscode.workspace.getConfiguration('ifcViewer');
@@ -26,20 +34,26 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
   const loadedEmitter = new vscode.EventEmitter<LoadedStats>();
   let lastLoaded: LoadedStats | undefined;
   let settings = loadSettings();
+  const output = vscode.window.createOutputChannel('IFC Viewer');
+  const engine = new EngineController(context, () => settings, output);
+  engineController = engine;
 
   const { provider, disposable } = IfcEditorProvider.register(context, (stats) => {
     lastLoaded = stats;
     loadedEmitter.fire(stats);
   });
-  const agentBridge = new AgentBridge(context, provider, () => settings);
+  provider.setSessionHost(engine);
+  const agentBridge = new AgentBridge(context, provider, () => settings, engine, output);
   bridge = agentBridge;
   provider.setHooks({
     agentStatus: (uri) => agentBridge.statusFor(uri),
     webviewConfig: () => ({
       showLegend: settings.highlightLegend.visible,
       revealHiddenCategories: settings.agentBridge.revealHiddenCategories,
+      highlightAgentEdits: settings.engine.highlightAgentEdits,
     }),
     toggleAgent: (uri) => void agentBridge.toggleFor(uri),
+    engineAction: (uri) => void engine.showMenu(provider.documentFor(uri)?.session?.state),
   });
   const reloader = new AutoReloader(provider, () => settings, (uri) => agentBridge.isConnectedUri(uri));
 
@@ -68,9 +82,13 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
     loadedEmitter,
     agentBridge,
     reloader,
+    output,
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('ifcViewer')) return;
+      const before = settings;
       settings = loadSettings();
+      engine.applySettings();
+      if (before.engine.python !== settings.engine.python) void engine.interpreterChanged();
       void agentBridge.applySettings();
     }),
     vscode.commands.registerCommand('vscodeIfcViewer.resetView', () => {
@@ -85,6 +103,9 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
     vscode.commands.registerCommand('vscodeIfcViewer.toggleProperties', () => {
       provider.postCommandToActive('toggleProperties');
     }),
+    vscode.commands.registerCommand('vscodeIfcViewer.setupIfcOpenShell', () => engine.setup()),
+    vscode.commands.registerCommand('vscodeIfcViewer.selectEngine', () => engine.selectMode()),
+    vscode.commands.registerCommand('vscodeIfcViewer.showLog', () => output.show(true)),
     vscode.commands.registerCommand('vscodeIfcViewer.connectAgent', async (arg?: unknown) => {
       if (!settings.agentBridge.enabled) {
         const open = await vscode.window.showInformationMessage(
@@ -104,11 +125,21 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
       }
       try {
         await agentBridge.connect(folder);
+        void agentBridge.announceGuide(folder);
         return true;
       } catch (err) {
         void vscode.window.showErrorMessage(`IFC Viewer: ${err instanceof Error ? err.message : String(err)}`);
         return false;
       }
+    }),
+    vscode.commands.registerCommand('vscodeIfcViewer.addAgentInstructions', async (arg?: unknown) => {
+      const local = (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file');
+      const folder = await chooseFolder(arg, local);
+      if (!folder) {
+        void vscode.window.showInformationMessage('Open a local folder first.');
+        return undefined;
+      }
+      return agentBridge.addInstructions(folder);
     }),
     vscode.commands.registerCommand('vscodeIfcViewer.disconnectAgent', async (arg?: unknown) => {
       const folder = await chooseFolder(arg, agentBridge.connectedFolders());
@@ -141,6 +172,8 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
   return {
     onDidLoadModel: loadedEmitter.event,
     getLastLoaded: () => lastLoaded,
+    engine,
+    sessionFor: (uri) => provider.documentFor(uri)?.session ?? null,
   };
 }
 
@@ -148,4 +181,6 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
 export async function deactivate(): Promise<void> {
   await bridge?.shutdown();
   bridge = undefined;
+  await engineController?.dispose();
+  engineController = undefined;
 }

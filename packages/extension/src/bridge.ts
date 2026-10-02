@@ -8,21 +8,38 @@ import { promises as fs } from 'node:fs';
 import * as path from 'node:path';
 import {
   BRIDGE_DIR,
+  CLIENT_FILE,
+  GUIDE_FILE,
+  INSTRUCTION_BLOCK,
+  INSTRUCTION_TARGETS,
+  upsertInstructionBlock,
   PROTOCOL_VERSION,
   buildState,
   isInside,
   isSafeId,
+  renderAgentGuide,
   resolveModelPath,
   toPosix,
   validateCommand,
 } from './bridgeProtocol.js';
 import type { InboxCommand, PanelSnapshot } from './bridgeProtocol.js';
+import { McpHandler } from './mcp/handler.js';
+import { startMcpHttp } from './mcp/httpServer.js';
+import type { RunningMcpServer } from './mcp/httpServer.js';
+import { SHIM_SOURCE } from './mcp/shim.js';
+import { buildTools } from './agentTools.js';
+import type { ResolvedTarget, ToolHost } from './agentTools.js';
+import type { EngineController } from './engine.js';
 import type { IfcEditorProvider, PanelChange, ViewerPanel } from './ifcEditorProvider.js';
 import type { AgentStatus, BridgeAck } from './protocol.js';
 import type { ExtensionSettings } from './settings.js';
 
+const SERVER_FILE = 'server.json';
+const SHIM_FILE = 'mcp-shim.mjs';
+
 const CONNECTED_KEY = 'ifcViewer.agentBridge.connectedFolders';
 const CREATED_ROOT_KEY = 'ifcViewer.agentBridge.createdRootFolders';
+const GUIDE_ANNOUNCED_KEY = 'ifcViewer.agentBridge.guideAnnounced';
 const GITIGNORE = '*\n';
 
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -71,6 +88,12 @@ async function writeIfMissing(file: string, text: string): Promise<void> {
   if (!(await exists(file))) await fs.writeFile(file, text, 'utf8');
 }
 
+/** Write a file only when its content differs, so a connect does not touch it needlessly. */
+async function writeIfChanged(file: string, text: string): Promise<void> {
+  const current = await fs.readFile(file, 'utf8').catch(() => null);
+  if (current !== text) await fs.writeFile(file, text, 'utf8');
+}
+
 /**
  * Delete a file, retrying briefly while Windows (antivirus, indexer) holds
  * it open. Resolves false when it is still there.
@@ -100,6 +123,8 @@ export class AgentBridge implements vscode.Disposable {
     private readonly context: vscode.ExtensionContext,
     private readonly provider: IfcEditorProvider,
     private readonly settings: () => ExtensionSettings,
+    private readonly engine: EngineController,
+    private readonly output: vscode.OutputChannel,
   ) {
     this.enabled = settings().agentBridge.enabled;
     this.statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -178,12 +203,64 @@ export class AgentBridge implements vscode.Disposable {
     await this.stopConnection(folder, remove ? 'remove' : 'close');
   }
 
+  /**
+   * Tell the user, once per workspace, how to point their agent at the guide
+   * written on connect. Not awaited by callers: it waits for a button click.
+   */
+  async announceGuide(folder: vscode.WorkspaceFolder): Promise<void> {
+    const guide = this.guidePath(folder);
+    if (!guide || this.context.workspaceState.get<boolean>(GUIDE_ANNOUNCED_KEY, false)) return;
+    await this.context.workspaceState.update(GUIDE_ANNOUNCED_KEY, true);
+    const add = 'Add to instructions';
+    const copy = 'Copy line';
+    const open = 'Open guide';
+    const pick = await vscode.window.showInformationMessage(
+      'Connected. Any agent can now query and edit the live model with python .ifc-skills/viewer/ifc_live.py. ' +
+        'To make your agent find it, add the viewer line to its instructions file.',
+      add,
+      copy,
+      open,
+    );
+    if (pick === add) await this.addInstructions(folder);
+    else if (pick === copy) await vscode.env.clipboard.writeText(INSTRUCTION_BLOCK);
+    else if (pick === open) await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(guide));
+  }
+
+  /** Let the user pick an instruction file (AGENTS.md, Copilot, CLAUDE.md) and add the viewer block to it. */
+  async addInstructions(folder: vscode.WorkspaceFolder): Promise<string | undefined> {
+    const picked = await vscode.window.showQuickPick(
+      [
+        ...INSTRUCTION_TARGETS.map((t) => ({ label: t.label, description: t.detail, file: t.file })),
+        { label: '$(clippy) Copy to clipboard', description: 'paste it into any instructions file yourself', file: '' },
+      ],
+      { placeHolder: 'Which agent instructions file should get the IFC Viewer lines?' },
+    );
+    if (!picked) return undefined;
+    if (!picked.file) {
+      await vscode.env.clipboard.writeText(INSTRUCTION_BLOCK);
+      void vscode.window.showInformationMessage('Copied the IFC Viewer instructions.');
+      return undefined;
+    }
+    const target = path.join(folder.uri.fsPath, ...picked.file.split('/'));
+    const existing = await fs.readFile(target, 'utf8').catch(() => '');
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, upsertInstructionBlock(existing), 'utf8');
+    void vscode.window.showInformationMessage(`Added the IFC Viewer lines to ${picked.file}.`, 'Open').then((open) => {
+      if (open) void vscode.commands.executeCommand('vscode.open', vscode.Uri.file(target));
+    });
+    return target;
+  }
+
   async toggleFor(uri: vscode.Uri): Promise<void> {
     const folder = this.folderOf(uri);
     if (!folder) return;
     try {
-      if (this.isConnected(folder)) await this.disconnect(folder);
-      else await this.connect(folder);
+      if (this.isConnected(folder)) {
+        await this.disconnect(folder);
+      } else {
+        await this.connect(folder);
+        void this.announceGuide(folder);
+      }
     } catch (err) {
       void vscode.window.showErrorMessage(`IFC Viewer: ${errorText(err)}`);
     }
@@ -227,14 +304,46 @@ export class AgentBridge implements vscode.Disposable {
     await this.context.workspaceState.update(CONNECTED_KEY, [...list]);
   }
 
+  /** The bundled agent guide with this viewer's version, or null when it cannot be read. */
+  private async loadGuide(version: string): Promise<string | null> {
+    try {
+      const file = vscode.Uri.joinPath(this.context.extensionUri, 'media', 'agent-guide.md').fsPath;
+      return renderAgentGuide(await fs.readFile(file, 'utf8'), version);
+    } catch {
+      return null;
+    }
+  }
+
+  /** The bundled Python client, or null when it cannot be read. */
+  private async loadClient(): Promise<string | null> {
+    try {
+      const file = vscode.Uri.joinPath(this.context.extensionUri, 'media', CLIENT_FILE).fsPath;
+      return await fs.readFile(file, 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  /** Path of the guide a connected folder holds (null when it is not connected). */
+  guidePath(folder: vscode.WorkspaceFolder): string | null {
+    return this.connections.has(folder.uri.toString())
+      ? path.join(folder.uri.fsPath, ...BRIDGE_DIR, GUIDE_FILE)
+      : null;
+  }
+
   private async startConnection(folder: vscode.WorkspaceFolder): Promise<void> {
     const key = folder.uri.toString();
     if (this.connections.has(key)) return;
-    const connection = new FolderConnection(folder, this.provider, this.settings, {
-      id: this.context.extension.id,
-      version: String(this.context.extension.packageJSON.version ?? '0.0.0'),
-      uriScheme: vscode.env.uriScheme,
-    });
+    const version = String(this.context.extension.packageJSON.version ?? '0.0.0');
+    const connection = new FolderConnection(
+      folder,
+      this.provider,
+      this.settings,
+      { id: this.context.extension.id, version, uriScheme: vscode.env.uriScheme },
+      { guide: await this.loadGuide(version), client: await this.loadClient() },
+      this.engine,
+      this.output,
+    );
     this.connections.set(key, connection);
     try {
       const createdRoot = await connection.start();
@@ -329,12 +438,18 @@ class FolderConnection {
   private starting: Promise<boolean> | null = null;
   /** Panel used when a command names no model and none is focused. */
   private lastActive: string | null = null;
+  /** The agent tool server (MCP over loopback HTTP), while this folder is connected. */
+  private tools: RunningMcpServer | null = null;
+  private toolCounter = 0;
 
   constructor(
     readonly folder: vscode.WorkspaceFolder,
     private readonly provider: IfcEditorProvider,
     private readonly settings: () => ExtensionSettings,
     private readonly viewerInfo: { id: string; version: string; uriScheme: string },
+    private readonly assets: { guide: string | null; client: string | null },
+    private readonly engine: EngineController,
+    private readonly output: vscode.OutputChannel,
   ) {
     this.folderPath = folder.uri.fsPath;
     this.root = path.join(this.folderPath, BRIDGE_DIR[0]);
@@ -355,6 +470,7 @@ class FolderConnection {
     await fs.mkdir(this.inbox, { recursive: true });
     await fs.mkdir(this.outbox, { recursive: true });
     await writeIfMissing(path.join(this.dir, '.gitignore'), GITIGNORE);
+    if (this.assets.guide !== null) await writeIfChanged(path.join(this.dir, GUIDE_FILE), this.assets.guide);
     // Only a .ifc-skills/ folder we created gets a catch-all .gitignore; one
     // made by the skill pack may hold files its owner wants committed.
     if (!rootExisted) await writeIfMissing(path.join(this.root, '.gitignore'), GITIGNORE);
@@ -370,9 +486,71 @@ class FolderConnection {
     this.watcher.onDidCreate((uri) => this.enqueue(path.basename(uri.fsPath)));
     this.watcher.onDidChange((uri) => this.enqueue(path.basename(uri.fsPath)));
     this.restartTimers();
+    await this.startTools();
     await this.writeState();
     await this.scanInbox();
     return !rootExisted;
+  }
+
+  // -- agent tools (MCP) --------------------------------------------------------
+
+  private toolHost(): ToolHost {
+    return {
+      runViewerOp: (fields) => this.runViewerOp(fields),
+      resolveTarget: (model) => this.resolveTarget(model),
+      ensurePanel: async (target) => {
+        const timeoutMs = this.settings().agentBridge.commandTimeoutSeconds * 1000;
+        if (target.panel) {
+          await target.panel.whenLoaded(timeoutMs);
+          return target.panel;
+        }
+        return this.provider.open(target.uri, timeoutMs);
+      },
+      state: () => this.currentState(true),
+      scriptsAllowed: () => this.engine.scriptsAllowed(),
+    };
+  }
+
+  /** Start the tool server and publish how to reach it. Failure leaves the file bridge working. */
+  private async startTools(): Promise<void> {
+    if (!this.settings().agentBridge.mcpTools || this.tools || this.stopped) return;
+    try {
+      const handler = new McpHandler(
+        {
+          name: 'ifc-viewer',
+          version: this.viewerInfo.version,
+          instructions:
+            'Tools for the IFC model the user has open in their editor. Answer questions from the model with query, ' +
+            'never from memory. Show results with highlight and select. Edits are applied to the live model, ' +
+            'highlighted for the user, and only reach the file when the user saves. Read .ifc-skills/viewer/SKILL.md for details.',
+        },
+        buildTools(this.toolHost()),
+      );
+      this.tools = await startMcpHttp(handler);
+      if (this.stopped) {
+        await this.stopTools();
+        return;
+      }
+      await writeIfChanged(path.join(this.dir, SHIM_FILE), SHIM_SOURCE);
+      if (this.assets.client !== null) await writeIfChanged(path.join(this.dir, CLIENT_FILE), this.assets.client);
+      await writeJsonAtomic(path.join(this.dir, SERVER_FILE), {
+        protocol: PROTOCOL_VERSION,
+        url: `http://127.0.0.1:${this.tools.port}/mcp`,
+        token: this.tools.token,
+        pid: process.pid,
+        version: this.viewerInfo.version,
+      });
+    } catch (err) {
+      this.output.appendLine(`agent tool server could not start: ${errorText(err)}`);
+      await this.stopTools();
+    }
+  }
+
+  private async stopTools(): Promise<void> {
+    const tools = this.tools;
+    this.tools = null;
+    await removeFile(path.join(this.dir, SERVER_FILE));
+    await tools?.close().catch(() => undefined);
   }
 
   async stop(mode: 'close' | 'remove', createdRoot = false): Promise<void> {
@@ -384,6 +562,7 @@ class FolderConnection {
     if (this.stateTimer) clearTimeout(this.stateTimer);
     this.heartbeat = null;
     this.stateTimer = null;
+    await this.stopTools();
     await this.writing.catch(() => undefined);
     if (mode === 'close') {
       await this.writeStateNow(false).catch(() => undefined);
@@ -431,13 +610,16 @@ class FolderConnection {
     return this.writing;
   }
 
-  private async writeStateNow(open: boolean): Promise<void> {
-    const state = buildState(this.viewerInfo, this.snapshots(), {
+  private currentState(open: boolean) {
+    return buildState(this.viewerInfo, this.snapshots(), {
       open,
       nowMs: Date.now(),
       heartbeatSeconds: this.settings().agentBridge.heartbeatSeconds,
     });
-    await writeJsonAtomic(this.statePath, state);
+  }
+
+  private async writeStateNow(open: boolean): Promise<void> {
+    await writeJsonAtomic(this.statePath, this.currentState(open));
   }
 
   private panelsHere(): ViewerPanel[] {
@@ -456,6 +638,9 @@ class FolderConnection {
       selection: p.selection,
       highlights: p.highlights,
       isolated: p.isolated,
+      engine: p.session?.state.engine ?? 'web-ifc',
+      editable: p.session?.state.canEdit ?? false,
+      dirty: p.session?.dirty ?? false,
     }));
   }
 
@@ -558,6 +743,40 @@ class FolderConnection {
     );
   }
 
+  /** The model a command or tool names (or the default one), checked to stay inside the folder. */
+  private async resolveTarget(modelPath: string | undefined): Promise<ResolvedTarget> {
+    if (modelPath !== undefined) {
+      const resolved = resolveModelPath(this.folderPath, modelPath);
+      if (!resolved.ok) return { ok: false, error: resolved.error };
+      // Resolve links too: a symlink must not lead outside the folder.
+      let real: string;
+      try {
+        real = await fs.realpath(resolved.absolute);
+      } catch {
+        return { ok: false, error: `"${modelPath}" does not exist.`, model: resolved.relative };
+      }
+      const realFolder = await fs.realpath(this.folderPath).catch(() => this.folderPath);
+      if (!isInside(realFolder, real)) return { ok: false, error: `"${modelPath}" is outside the workspace folder.` };
+      const uri = vscode.Uri.file(resolved.absolute);
+      return { ok: true, uri, panel: this.provider.panelFor(uri), model: toPosix(path.relative(this.folderPath, uri.fsPath)) };
+    }
+    const panel = this.defaultPanel();
+    if (!panel) return { ok: false, error: 'No model is open in this folder; name one with "model".' };
+    return { ok: true, uri: panel.uri, panel, model: toPosix(path.relative(this.folderPath, panel.uri.fsPath)) };
+  }
+
+  /** A viewer op from an agent tool: validated exactly like an inbox command. */
+  private async runViewerOp(fields: Record<string, unknown>): Promise<{ ack: BridgeAck; model?: string }> {
+    const s = this.settings().agentBridge;
+    const id = `tool-${Date.now().toString(36)}-${this.toolCounter++}`;
+    const validation = validateCommand(
+      { protocol: PROTOCOL_VERSION, id, createdAt: Date.now(), ...fields },
+      { nowMs: Date.now(), maxAgeMs: s.maxCommandAgeSeconds * 1000, maxIds: s.maxIdsPerCommand },
+    );
+    if (!validation.ok) return { ack: invalidAck(id, validation.error) };
+    return this.execute(validation.command);
+  }
+
   private async execute(command: InboxCommand): Promise<{ ack: BridgeAck; model?: string }> {
     const s = this.settings();
     const timeoutMs = s.agentBridge.commandTimeoutSeconds * 1000;
@@ -567,28 +786,10 @@ class FolderConnection {
       model,
     });
 
-    let uri: vscode.Uri;
-    let panel: ViewerPanel | undefined;
-    if (command.model !== undefined) {
-      const resolved = resolveModelPath(this.folderPath, command.model);
-      if (!resolved.ok) return fail(resolved.error);
-      // Resolve links too: a symlink must not lead outside the folder.
-      let real: string;
-      try {
-        real = await fs.realpath(resolved.absolute);
-      } catch {
-        return fail(`"${command.model}" does not exist.`, resolved.relative);
-      }
-      const realFolder = await fs.realpath(this.folderPath).catch(() => this.folderPath);
-      if (!isInside(realFolder, real)) return fail(`"${command.model}" is outside the workspace folder.`);
-      uri = vscode.Uri.file(resolved.absolute);
-      panel = this.provider.panelFor(uri);
-    } else {
-      panel = this.defaultPanel();
-      if (!panel) return fail('No model is open in this folder; name one with "model".');
-      uri = panel.uri;
-    }
-    const model = toPosix(path.relative(this.folderPath, uri.fsPath));
+    const target = await this.resolveTarget(command.model);
+    if (!target.ok) return fail(target.error, target.model);
+    const { uri, model } = target;
+    let panel = target.panel;
 
     try {
       if (command.op === 'open') {

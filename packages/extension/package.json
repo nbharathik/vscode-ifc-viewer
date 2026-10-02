@@ -22,8 +22,18 @@
     "onCommand:vscodeIfcViewer.showStatistics",
     "onCommand:vscodeIfcViewer.toggleTree",
     "onCommand:vscodeIfcViewer.toggleProperties",
+    "onCommand:vscodeIfcViewer.setupIfcOpenShell",
+    "onCommand:vscodeIfcViewer.selectEngine",
+    "onCommand:vscodeIfcViewer.showLog",
     "workspaceContains:.ifc-skills/viewer/state.json"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In an untrusted workspace the viewer stays read-only: Python and IfcOpenShell are not started and agent scripts are disabled.",
+      "restrictedConfigurations": ["ifcViewer.engine.python"]
+    }
+  },
   "contributes": {
     "customEditors": [
       {
@@ -59,8 +69,28 @@
         "category": "IFC Viewer"
       },
       {
+        "command": "vscodeIfcViewer.setupIfcOpenShell",
+        "title": "Set Up IfcOpenShell",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.selectEngine",
+        "title": "Select Engine Mode",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.showLog",
+        "title": "Show Log",
+        "category": "IFC Viewer"
+      },
+      {
         "command": "vscodeIfcViewer.connectAgent",
         "title": "Connect to Agent",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.addAgentInstructions",
+        "title": "Add Agent Instructions",
         "category": "IFC Viewer"
       },
       {
@@ -77,6 +107,43 @@
     "configuration": {
       "title": "IFC Viewer",
       "properties": {
+        "ifcViewer.engine.mode": {
+          "type": "string",
+          "enum": ["auto", "web-ifc", "ifcopenshell"],
+          "enumDescriptions": [
+            "web-ifc draws the model. When Python with IfcOpenShell is available it also holds the live model: editing, queries and agent tools.",
+            "web-ifc only. Read-only, no Python is started.",
+            "Like Automatic, but warn when IfcOpenShell is not available."
+          ],
+          "default": "auto",
+          "order": 20,
+          "description": "How the IFC Viewer uses IfcOpenShell. Reopen IFC files after changing it."
+        },
+        "ifcViewer.engine.python": {
+          "type": "string",
+          "default": "",
+          "order": 21,
+          "scope": "machine-overridable",
+          "markdownDescription": "Python interpreter with `ifcopenshell>=0.8.4,<0.9` installed. Leave empty to use the environment from **IFC Viewer: Set Up IfcOpenShell**, then `py -3` / `python3` / `python` on the PATH."
+        },
+        "ifcViewer.engine.allowScripts": {
+          "type": "boolean",
+          "default": true,
+          "order": 22,
+          "markdownDescription": "Let a connected agent run Python scripts against the live model (the `query` tool). Edits stay in memory until you save. Always off in untrusted workspaces."
+        },
+        "ifcViewer.engine.highlightAgentEdits": {
+          "type": "boolean",
+          "default": true,
+          "order": 23,
+          "description": "Highlight the elements an agent changed through the live model, as the group \"Changed by agent\"."
+        },
+        "ifcViewer.agentBridge.mcpTools": {
+          "type": "boolean",
+          "default": true,
+          "order": 24,
+          "markdownDescription": "While connected, also serve agent tools (select, highlight, query, edit, save) on a local port, reachable through `.ifc-skills/viewer/mcp-shim.mjs`. The file protocol keeps working either way."
+        },
         "ifcViewer.agentBridge.enabled": {
           "type": "boolean",
           "default": true,
@@ -204,6 +271,7 @@
     "build:watch": "node esbuild.mjs --watch",
     "compile:test": "tsc -p tsconfig.test.json",
     "test:ext": "npm run build && npm run compile:test && node ./out-test/test/runTest.js",
+    "test:ext:insiders": "npm run build && npm run compile:test && node ./out-test/test/runTestInsiders.js",
     "test:ext:packaged": "npm run build && npm run compile:test && node ./out-test/test/runTestPackaged.js",
     "package": "node esbuild.mjs --production && vsce package --no-dependencies -o ../../"
   },

@@ -27,7 +27,8 @@ async function main(): Promise<void> {
     extensionDevelopmentPath,
     extensionTestsPath,
     extensionTestsEnv: { IFC_FIXTURES: fixtures, IFC_TEST_WORKSPACE: workspace },
-    launchArgs: [workspace, '--disable-extensions', '--disable-gpu'],
+    // Trust the throwaway workspace: the editing engine only starts in trusted ones.
+    launchArgs: [workspace, '--disable-extensions', '--disable-gpu', '--disable-workspace-trust'],
   });
 }
 

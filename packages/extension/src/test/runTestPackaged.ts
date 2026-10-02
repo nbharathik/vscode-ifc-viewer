@@ -28,7 +28,7 @@ async function main(): Promise<void> {
     extensionDevelopmentPath: staged,
     extensionTestsPath: path.resolve(__dirname, './suite/index'),
     extensionTestsEnv: { IFC_FIXTURES: fixtures, IFC_TEST_WORKSPACE: workspace },
-    launchArgs: [workspace, '--disable-extensions', '--disable-gpu'],
+    launchArgs: [workspace, '--disable-extensions', '--disable-gpu', '--disable-workspace-trust'],
   });
 }
 
