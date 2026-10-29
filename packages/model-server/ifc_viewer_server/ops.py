@@ -53,6 +53,134 @@ def _find_pset(entity, pset_name, pset_id):
     return None
 
 
+def _owned_pset(model, entity, pset_name, pset_id):
+    """The property set this element owns with that name or id, or None.
+
+    A set that comes from the type is shared: editing it would change every
+    occurrence, so only sets the element itself owns count.
+    """
+    existing_id = _find_pset(entity, pset_name, pset_id)
+    if existing_id is None:
+        return None
+    owned_ids = {
+        rel.RelatingPropertyDefinition.id()
+        for rel in (getattr(entity, "IsDefinedBy", None) or [])
+        if rel.is_a("IfcRelDefinesByProperties")
+    }
+    return model.by_id(existing_id) if existing_id in owned_ids else None
+
+
+_QUANTITY_VALUE = {
+    "IfcQuantityLength": "LengthValue",
+    "IfcQuantityArea": "AreaValue",
+    "IfcQuantityVolume": "VolumeValue",
+    "IfcQuantityCount": "CountValue",
+    "IfcQuantityWeight": "WeightValue",
+    "IfcQuantityTime": "TimeValue",
+}
+
+
+def _kind_of(ifc_type):
+    """How a value of this IFC type is written: bool, int, float or str."""
+    if ifc_type in ("IfcBoolean", "IfcLogical"):
+        return "bool"
+    if ifc_type == "IfcInteger":
+        return "int"
+    if ifc_type in ("IfcReal", "IfcNumber") or ifc_type.endswith("Measure") or ifc_type.startswith(
+        ("IfcPositive", "IfcNonNegative", "IfcNormalised", "IfcRatio")
+    ):
+        return "float"
+    return "str"
+
+
+def _coerce(ifc_type, value):
+    """`value` as a plain Python value that fits `ifc_type`, or an OpError saying why not."""
+    kind = _kind_of(ifc_type)
+    if kind == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+            return value.strip().lower() == "true"
+        raise OpError(f"{ifc_type} takes true or false")
+    if kind in ("int", "float"):
+        if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+            raise OpError(f"{ifc_type} takes a number")
+        try:
+            number = float(value)
+        except ValueError:
+            raise OpError(f"{ifc_type} takes a number, not {value!r}") from None
+        if number != number or number in (float("inf"), float("-inf")):
+            raise OpError(f"{ifc_type} takes a finite number")
+        if kind == "int":
+            if number != int(number):
+                raise OpError(f"{ifc_type} takes a whole number")
+            return int(number)
+        return number
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return None if value is None else str(value)
+    raise OpError(f"{ifc_type} takes text")
+
+
+def _wrap(model, ifc_type, value):
+    """An IFC value of type `ifc_type` holding `value` (None leaves the property valueless)."""
+    if value is None:
+        return None
+    try:
+        return model.create_entity(ifc_type, _coerce(ifc_type, value))
+    except OpError:
+        raise
+    except Exception as err:
+        raise OpError(f"{value!r} is not a valid {ifc_type}: {err}") from None
+
+
+# What the editor's Text, Number and Yes/No choices create.
+_NEW_TYPES = {"text": "IfcLabel", "number": "IfcReal", "boolean": "IfcBoolean"}
+
+
+def _new_type(op, value):
+    declared = op.get("valueType")
+    if isinstance(declared, str) and declared:
+        return _NEW_TYPES.get(declared.lower(), declared)
+    if isinstance(value, bool):
+        return "IfcBoolean"
+    if isinstance(value, (int, float)):
+        return "IfcReal"
+    return "IfcLabel"
+
+
+def _set_existing_property(model, prop, value):
+    if prop.is_a("IfcPropertySingleValue"):
+        current = prop.NominalValue
+        ifc_type = current.is_a() if current is not None else _new_type({}, value)
+        ifcopenshell.api.run(
+            "attribute.edit_attributes", model, product=prop, attributes={"NominalValue": _wrap(model, ifc_type, value)}
+        )
+    elif prop.is_a("IfcPropertyEnumeratedValue"):
+        allowed = []
+        reference = prop.EnumerationReference
+        if reference is not None:
+            allowed = [v.wrappedValue for v in (reference.EnumerationValues or [])]
+        if value is not None and allowed and value not in allowed:
+            raise OpError(f"{prop.Name} must be one of: {', '.join(str(a) for a in allowed)}")
+        ifc_type = (prop.EnumerationValues[0].is_a() if prop.EnumerationValues else "IfcLabel")
+        values = [] if value is None else [_wrap(model, ifc_type, value)]
+        ifcopenshell.api.run("attribute.edit_attributes", model, product=prop, attributes={"EnumerationValues": values})
+    elif prop.is_a("IfcPhysicalSimpleQuantity"):
+        attr = _QUANTITY_VALUE.get(prop.is_a())
+        if attr is None:
+            raise OpError(f"{prop.Name} cannot be edited here")
+        ifcopenshell.api.run(
+            "attribute.edit_attributes", model, product=prop, attributes={attr: _coerce("IfcReal", value)}
+        )
+    else:
+        raise OpError(f"{prop.Name} ({prop.is_a()}) cannot be edited here")
+
+
+def _find_property(pset, name):
+    members = list(getattr(pset, "HasProperties", None) or getattr(pset, "Quantities", None) or [])
+    return next((p for p in members if p.Name == name), None)
+
+
 def set_property(model, op):
     entity = _by_global_id_or_id(model, op)
     pset_name = op.get("pset")
@@ -62,28 +190,49 @@ def set_property(model, op):
     pset_id = op.get("psetId")
     if pset_id is None and not isinstance(pset_name, str):
         raise OpError('"pset" or "psetId" is required')
-    existing_id = _find_pset(entity, pset_name, pset_id)
-    own = None
-    if existing_id is not None:
-        candidate = model.by_id(existing_id)
-        # A set that comes from the type is shared; editing it changes every
-        # occurrence, so only edit sets this element owns.
-        owned_ids = {
-            rel.RelatingPropertyDefinition.id()
-            for rel in (getattr(entity, "IsDefinedBy", None) or [])
-            if rel.is_a("IfcRelDefinesByProperties")
-        }
-        if candidate.id() in owned_ids:
-            own = candidate
+    value = op.get("value")
+    own = _owned_pset(model, entity, pset_name, pset_id)
     if own is None:
         name = pset_name or model.by_id(pset_id).Name
         is_qto = op.get("kind") == "qto" or (isinstance(name, str) and name.startswith("Qto_"))
         adder = "pset.add_qto" if is_qto else "pset.add_pset"
         own = ifcopenshell.api.run(adder, model, product=entity, name=name)
-    editor = "pset.edit_qto" if own.is_a("IfcElementQuantity") else "pset.edit_pset"
-    value = op.get("value")
-    arg = "qto" if own.is_a("IfcElementQuantity") else "pset"
-    ifcopenshell.api.run(editor, model, **{arg: own, "properties": {prop: value}})
+    existing = _find_property(own, prop)
+    if existing is not None:
+        _set_existing_property(model, existing, value)
+        return
+    if own.is_a("IfcElementQuantity"):
+        ifcopenshell.api.run("pset.edit_qto", model, qto=own, properties={prop: _coerce("IfcReal", value)})
+        return
+    created = model.create_entity("IfcPropertySingleValue", Name=prop, NominalValue=_wrap(model, _new_type(op, value), value))
+    ifcopenshell.api.run(
+        "attribute.edit_attributes", model, product=own, attributes={"HasProperties": [*(own.HasProperties or []), created]}
+    )
+
+
+def add_pset(model, op):
+    entity = _by_global_id_or_id(model, op)
+    name = op.get("pset")
+    if not isinstance(name, str) or not name.strip():
+        raise OpError('"pset" is required')
+    if _owned_pset(model, entity, name, None) is not None:
+        raise OpError(f"{name} already exists on this element")
+    is_qto = op.get("kind") == "qto" or name.startswith("Qto_")
+    ifcopenshell.api.run("pset.add_qto" if is_qto else "pset.add_pset", model, product=entity, name=name)
+
+
+def remove_property(model, op):
+    entity = _by_global_id_or_id(model, op)
+    name = op.get("name")
+    if not isinstance(name, str) or not name:
+        raise OpError('"name" is required')
+    own = _owned_pset(model, entity, op.get("pset"), op.get("psetId"))
+    if own is None:
+        raise OpError("that property set belongs to the element's type; change it on the type instead")
+    if _find_property(own, name) is None:
+        raise OpError(f"{own.Name} has no property {name}")
+    editor, arg = ("pset.edit_qto", "qto") if own.is_a("IfcElementQuantity") else ("pset.edit_pset", "pset")
+    ifcopenshell.api.run(editor, model, **{arg: own, "properties": {name: None}})
 
 
 def remove_pset(model, op):
@@ -149,6 +298,8 @@ def create_product(model, op):
 OPS = {
     "setAttribute": set_attribute,
     "setProperty": set_property,
+    "addPset": add_pset,
+    "removeProperty": remove_property,
     "removePset": remove_pset,
     "deleteProduct": delete_product,
     "setPlacement": set_placement,

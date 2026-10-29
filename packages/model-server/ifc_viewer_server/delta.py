@@ -48,14 +48,25 @@ def _is_subtype(schema, type_name, ancestor):
 
 
 class Change:
-    __slots__ = ("id", "properties", "geometry", "relationships", "created")
+    __slots__ = ("id", "properties", "placement", "representation", "relationships", "created")
 
     def __init__(self, entity_id):
         self.id = entity_id
         self.properties = False
-        self.geometry = False
+        # Moving an element (placement) and reshaping it (representation) are
+        # told apart: a move can reuse the shape it already had.
+        self.placement = False
+        self.representation = False
         self.relationships = False
         self.created = False
+
+    @property
+    def geometry(self):
+        return self.placement or self.representation
+
+    @property
+    def placement_only(self):
+        return self.placement and not self.representation and not self.created
 
 
 def _exists(model, entity_id):
@@ -86,12 +97,15 @@ class Resolver:
         self.removed = set()
         self.tree_dirty = False
 
-    def _mark(self, entity, *, properties=False, geometry=False, relationships=False, created=False):
+    def _mark(
+        self, entity, *, properties=False, placement=False, representation=False, relationships=False, created=False
+    ):
         change = self.changes.get(entity.id())
         if change is None:
             change = self.changes[entity.id()] = Change(entity.id())
         change.properties = change.properties or properties
-        change.geometry = change.geometry or geometry
+        change.placement = change.placement or placement
+        change.representation = change.representation or representation
         change.relationships = change.relationships or relationships
         change.created = change.created or created
 
@@ -107,10 +121,10 @@ class Resolver:
     def _from_relationship(self, rel, via):
         """Products on the other side of a relationship that changed."""
         if rel.is_a("IfcRelVoidsElement"):
-            self._mark_products([rel.RelatingBuildingElement], geometry=True)
+            self._mark_products([rel.RelatingBuildingElement], representation=True)
             return
         if rel.is_a("IfcRelFillsElement"):
-            self._mark_products([rel.RelatedBuildingElement], geometry=True)
+            self._mark_products([rel.RelatedBuildingElement], representation=True)
             return
         if rel.is_a("IfcRelAggregates") or rel.is_a("IfcRelContainedInSpatialStructure") or rel.is_a("IfcRelNests"):
             self.tree_dirty = True
@@ -145,8 +159,10 @@ class Resolver:
                     continue
                 if parent.is_a("IfcProduct") or parent.is_a("IfcProject"):
                     attr_names = [name for name, ref in _entity_refs(parent) if ref.id() == current.id()]
-                    if "ObjectPlacement" in attr_names or "Representation" in attr_names:
-                        self._mark(parent, geometry=True)
+                    if "ObjectPlacement" in attr_names:
+                        self._mark(parent, placement=True)
+                    elif "Representation" in attr_names:
+                        self._mark(parent, representation=True)
                     else:
                         self._mark(parent, **{chan: True})
                     continue
@@ -166,7 +182,9 @@ class Resolver:
                         self.removed.add(value.get("id"))
                     continue
                 if entity.is_a("IfcProduct"):
-                    self._mark(entity, properties=True, geometry=True, relationships=True, created=True)
+                    self._mark(
+                        entity, properties=True, placement=True, representation=True, relationships=True, created=True
+                    )
                     self.tree_dirty = True
                 else:
                     self.touch(entity, "properties")
@@ -179,7 +197,14 @@ class Resolver:
                         self.removed.add(value.get("id"))
                     else:
                         # An undo brought the product back with its old id.
-                        self._mark(entity, properties=True, geometry=True, relationships=True, created=True)
+                        self._mark(
+                            entity,
+                            properties=True,
+                            placement=True,
+                            representation=True,
+                            relationships=True,
+                            created=True,
+                        )
                     self.tree_dirty = True
                 elif _is_subtype(self.schema, type_name, "IfcRelationship"):
                     self.tree_dirty = self.tree_dirty or any(
@@ -195,10 +220,12 @@ class Resolver:
                     attr = entity.attribute_name(op["index"])
                 except Exception:
                     pass
-                if attr == "ObjectPlacement" or attr == "Representation":
-                    self.touch(entity, "geometry")
+                if attr == "ObjectPlacement":
+                    self.touch(entity, "placement")
+                elif attr == "Representation":
+                    self.touch(entity, "representation")
                 elif entity.is_a("IfcObjectPlacement") or attr == "PlacementRelTo":
-                    self.touch(entity, "geometry")
+                    self.touch(entity, "placement")
                 else:
                     self.touch(entity, "properties")
         # A product that was removed is not also a change.
@@ -221,6 +248,7 @@ def build_delta(model, operations, txn_number):
                 "ifcClass": entity.is_a(),
                 "properties": change.properties,
                 "geometry": change.geometry,
+                "placementOnly": change.placement_only,
                 "relationships": change.relationships,
                 "created": change.created,
             }

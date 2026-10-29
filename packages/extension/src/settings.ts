@@ -4,10 +4,16 @@
 export type AutoConnect = 'never' | 'remember' | 'always';
 export type AutoReloadMode = 'off' | 'whenConnected' | 'always';
 export type EngineMode = 'auto' | 'web-ifc' | 'ifcopenshell';
+/** When the IfcOpenShell session for a document starts. */
+export type EngineStart = 'auto' | 'onOpen' | 'onDemand';
 
 export interface ExtensionSettings {
   engine: {
     mode: EngineMode;
+    start: EngineStart;
+    maxFileSizeMb: number;
+    scriptTimeoutSeconds: number;
+    idleMinutes: number;
     python: string;
     allowScripts: boolean;
     highlightAgentEdits: boolean;
@@ -39,9 +45,13 @@ export interface ExtensionSettings {
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   engine: {
     mode: 'auto',
+    start: 'auto',
+    maxFileSizeMb: 200,
+    scriptTimeoutSeconds: 120,
+    idleMinutes: 10,
     python: '',
     allowScripts: true,
-    highlightAgentEdits: true,
+    highlightAgentEdits: false,
   },
   agentBridge: {
     mcpTools: true,
@@ -69,6 +79,9 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
 
 /** Numeric bounds, mirrored by minimum/maximum in package.json. */
 export const SETTING_BOUNDS: Record<string, [number, number]> = {
+  'engine.maxFileSizeMb': [1, 100000],
+  'engine.scriptTimeoutSeconds': [5, 3600],
+  'engine.idleMinutes': [0, 1440],
   'agentBridge.heartbeatSeconds': [2, 300],
   'agentBridge.selectionDebounceMs': [0, 5000],
   'agentBridge.maxCommandAgeSeconds': [5, 3600],
@@ -106,6 +119,10 @@ export function readSettings(read: SettingReader): ExtensionSettings {
   return {
     engine: {
       mode: oneOf(read, 'engine.mode', ['auto', 'web-ifc', 'ifcopenshell'], d.engine.mode),
+      start: oneOf(read, 'engine.start', ['auto', 'onOpen', 'onDemand'], d.engine.start),
+      maxFileSizeMb: num(read, 'engine.maxFileSizeMb', d.engine.maxFileSizeMb),
+      scriptTimeoutSeconds: num(read, 'engine.scriptTimeoutSeconds', d.engine.scriptTimeoutSeconds),
+      idleMinutes: num(read, 'engine.idleMinutes', d.engine.idleMinutes),
       python: typeof python === 'string' ? python.trim() : d.engine.python,
       allowScripts: bool(read, 'engine.allowScripts', d.engine.allowScripts),
       highlightAgentEdits: bool(read, 'engine.highlightAgentEdits', d.engine.highlightAgentEdits),

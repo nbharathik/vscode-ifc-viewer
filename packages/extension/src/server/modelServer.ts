@@ -47,6 +47,7 @@ export class ModelServer {
   private nextId = 1;
   private exited = false;
   private readonly exitListeners = new Set<(code: number | null) => void>();
+  private readonly notificationListeners = new Set<(method: string, params: Record<string, unknown>) => void>();
 
   constructor(private readonly options: ModelServerOptions) {}
 
@@ -57,6 +58,22 @@ export class ModelServer {
   onDidExit(listener: (code: number | null) => void): () => void {
     this.exitListeners.add(listener);
     return () => this.exitListeners.delete(listener);
+  }
+
+  /** Messages the server sends on its own (progress), as opposed to answers. */
+  onNotification(listener: (method: string, params: Record<string, unknown>) => void): () => void {
+    this.notificationListeners.add(listener);
+    return () => this.notificationListeners.delete(listener);
+  }
+
+  /** Stop the process now (a runaway script) and resolve once it is gone. */
+  kill(): Promise<void> {
+    const proc = this.proc;
+    if (!proc || this.exited) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      proc.once('exit', () => resolve());
+      proc.kill();
+    });
   }
 
   /** Spawn the process and confirm it answers `ping`. */
@@ -125,8 +142,19 @@ export class ModelServer {
       return;
     }
     for (const raw of messages) {
-      const message = raw as { id?: number; result?: unknown; error?: { code: number; message: string } };
-      if (typeof message.id !== 'number') continue;
+      const message = raw as {
+        id?: number;
+        method?: string;
+        params?: Record<string, unknown>;
+        result?: unknown;
+        error?: { code: number; message: string };
+      };
+      if (typeof message.id !== 'number') {
+        if (typeof message.method === 'string') {
+          for (const listener of this.notificationListeners) listener(message.method, message.params ?? {});
+        }
+        continue;
+      }
       const pending = this.pending.get(message.id);
       if (!pending) continue;
       this.pending.delete(message.id);

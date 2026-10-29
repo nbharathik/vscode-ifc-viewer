@@ -170,6 +170,8 @@ export class ModelBatcher {
   // Duplicate detection: geometry occurrences and where the first one went.
   private readonly geometrySeen = new Map<string, InstancedEntry | 'merged-once'>();
   private readonly instancedEntries: InstancedEntry[] = [];
+  /** Instances each element slot owns, so retiring an element can empty them. */
+  private readonly instancesBySlot = new Map<number, { entry: InstancedEntry; index: number }[]>();
 
   private highlighted: number | null = null;
   private hiddenSet = new Set<number>();
@@ -392,9 +394,28 @@ export class ModelBatcher {
       this.stateData[base + 3] = 255;
       this.totalTriangles -= record.triangles;
       this.elements.delete(id);
+      this.emptyInstances(record.index);
       any = true;
     }
     if (any) this.stateTexture.needsUpdate = true;
+  }
+
+  /**
+   * Zero the matrices of an element's instances. A zero matrix collapses every
+   * triangle to a point, which the GPU rejects before shading, so retired
+   * instances of a large shape cost almost nothing while edits keep adding new
+   * ones (merged geometry cannot be shrunk, but it is only ever the first copy).
+   */
+  private emptyInstances(slot: number): void {
+    const owned = this.instancesBySlot.get(slot);
+    if (!owned) return;
+    for (const { entry, index } of owned) {
+      const mesh = entry.mesh;
+      if (!mesh) continue;
+      mesh.instanceMatrix.array.fill(0, index * 16, index * 16 + 16);
+      mesh.instanceMatrix.needsUpdate = true;
+    }
+    this.instancesBySlot.delete(slot);
   }
 
   /** Coarse spatial cell (0..7) of a mesh's AABB center, in shifted space. */
@@ -706,6 +727,9 @@ export class ModelBatcher {
     entry.elementIndexAttr!.needsUpdate = true;
 
     this.expandInstancedSphere(entry, _m.elements);
+    const owned = this.instancesBySlot.get(elementIndex);
+    if (owned) owned.push({ entry, index: i });
+    else this.instancesBySlot.set(elementIndex, [{ entry, index: i }]);
   }
 
   /**

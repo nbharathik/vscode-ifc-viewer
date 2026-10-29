@@ -1,5 +1,5 @@
-// Statistics overlay (plain DOM), toggled by the "Show Statistics" command.
-// Shows parse/geometry timings, totals, and entity counts by IFC class.
+// Model tab of the sidebar (plain DOM): parse/geometry timings, totals and
+// entity counts by IFC class. Rendered when the tab is shown and after a load.
 import type { ModelStats } from '../engine/types.js';
 import { ensurePanelStyles } from './styles.js';
 
@@ -10,7 +10,6 @@ export interface StatsSource {
 export class StatsPanel {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
-  private visible = false;
 
   constructor(
     container: HTMLElement,
@@ -20,46 +19,20 @@ export class StatsPanel {
     ensurePanelStyles(doc);
 
     this.root = doc.createElement('div');
-    this.root.className = 'ifc-stats';
+    this.root.className = 'ifc-tab';
     this.root.setAttribute('data-testid', 'stats-panel');
 
-    const header = doc.createElement('div');
-    header.className = 'ifc-stats__header';
-    const title = doc.createElement('span');
-    title.textContent = 'Statistics';
-    const close = doc.createElement('span');
-    close.className = 'ifc-stats__close';
-    close.textContent = '✕';
-    close.setAttribute('data-testid', 'stats-close');
-    close.addEventListener('click', () => this.hide());
-    header.append(title, close);
-    this.root.appendChild(header);
-
     this.body = doc.createElement('div');
-    this.body.className = 'ifc-stats__body';
+    this.body.className = 'ifc-panel__body';
     this.root.appendChild(this.body);
 
     container.appendChild(this.root);
-  }
-
-  toggle(): void {
-    if (this.visible) this.hide();
-    else this.show();
-  }
-
-  show(): void {
     this.render();
-    this.visible = true;
-    this.root.classList.add('ifc-stats--visible');
   }
 
-  hide(): void {
-    this.visible = false;
-    this.root.classList.remove('ifc-stats--visible');
-  }
-
-  isVisible(): boolean {
-    return this.visible;
+  /** Re-read the stats (after a load, or when the tab is shown). */
+  refresh(): void {
+    this.render();
   }
 
   private render(): void {

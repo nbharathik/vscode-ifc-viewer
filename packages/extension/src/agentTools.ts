@@ -65,6 +65,8 @@ export function buildTools(host: ToolHost): ToolDef[] {
     if (!target.ok) throw new Error(target.error);
     const panel = await host.ensurePanel(target);
     const session = panel.session;
+    // On-demand sessions start here, the first time an agent needs the live model.
+    if (session?.state.state === 'idle') await session.start();
     if (!session?.ready) {
       throw new Error(
         `Editing and queries need IfcOpenShell, which is not active for ${target.model}. ` +
@@ -128,8 +130,9 @@ export function buildTools(host: ToolHost): ToolDef[] {
       description:
         'Run a Python script against the live IfcOpenShell model the user sees (the same model that edits change). ' +
         'Predefined: model (ifcopenshell.file), ifcopenshell, api (ifcopenshell.api), element_util (ifcopenshell.util.element). ' +
-        'print() results. Any edits the script makes become one undoable change in the viewer, highlighted for the user, ' +
-        'and nothing is written to disk until the user saves. Answer from the model, never from memory.',
+        'print() results. Any edits the script makes become one undoable change in the viewer, ' +
+        'and nothing is written to disk until the user saves. Answer from the model, never from memory. ' +
+        'Save reusable scripts in ifc-scripts/ and run them from there.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -163,8 +166,9 @@ export function buildTools(host: ToolHost): ToolDef[] {
     {
       name: 'edit',
       description:
-        'Apply typed edits to the live model in one undoable change, highlighted for the user and not saved until they save. ' +
-        'Ops: setAttribute {globalId|id, name, value}; setProperty {globalId|id, pset, name, value}; removePset {globalId|id, psetId}; ' +
+        'Apply typed edits to the live model in one undoable change, not saved until the user saves. ' +
+        'Ops: setAttribute {globalId|id, name, value}; setProperty {globalId|id, pset, name, value, valueType?}; ' +
+        'addPset {globalId|id, pset}; removeProperty {globalId|id, pset|psetId, name}; removePset {globalId|id, psetId}; ' +
         'deleteProduct {globalId|id}; setPlacement {globalId|id, location:[x,y,z] metres}; assignContainer {globalId|id, containerId}; ' +
         'assignType {globalId|id, typeId}; createProduct {ifcClass, name, containerId, location}. ' +
         'For anything else use query with ifcopenshell.api. All ops apply or none do.',

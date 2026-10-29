@@ -1,5 +1,6 @@
 """One open model: the IfcOpenShell file, its undo history, and save."""
 import contextlib
+import gc
 import io
 import os
 import time
@@ -11,7 +12,7 @@ import ifcopenshell.util.element as element_util
 
 from . import model_data
 from .delta import build_delta
-from .geometry import GeometryIds, build_patch
+from .geometry import GeometryIds, PatchBuilder
 from .ops import OpError, apply_ops
 
 
@@ -34,12 +35,20 @@ class Document:
         self._redo = []
         self._saved_marker = 0
         self._repl_names = None
+        self._patches = None
         self.reload()
 
     # -- lifecycle ---------------------------------------------------------
     def reload(self):
         started = time.perf_counter()
+        # Drop the previous model, its shape cache and script variables first, so
+        # a reload never holds two models in memory at once.
+        self.model = None
+        self._repl_names = None
+        self._patches = None
+        gc.collect()
         self.model = ifcopenshell.open(self.path)
+        self._patches = PatchBuilder(self._geometry_ids)
         self.load_seconds = round(time.perf_counter() - started, 3)
         self.mtime_ms = int(os.stat(self.path).st_mtime * 1000)
         self._undo.clear()
@@ -85,14 +94,21 @@ class Document:
     def global_id_of(self, express_id):
         return model_data.global_id_for(self.model, express_id)
 
-    def geometry(self, ids):
+    def geometry(self, ids, placement_only=frozenset()):
         entities = []
         for express_id in ids:
             try:
                 entities.append(self.model.by_id(express_id))
             except RuntimeError:
                 continue
-        return build_patch(self.model, entities, self._geometry_ids)
+        return self._patches.build(self.model, entities, frozenset(placement_only))
+
+    def release(self):
+        """Free the model and everything derived from it (the document is closing)."""
+        self.model = None
+        self._repl_names = None
+        self._patches = None
+        gc.collect()
 
     # -- edits -------------------------------------------------------------
     def _transaction(self, work):
@@ -117,10 +133,11 @@ class Document:
         return delta, self._patch_for(delta), result
 
     def _patch_for(self, delta):
+        self._patches.forget(delta["removed"])
         ids = [c["id"] for c in delta["changed"] if c["geometry"]]
         if not ids:
             return None
-        return self.geometry(ids)
+        return self.geometry(ids, {c["id"] for c in delta["changed"] if c["placementOnly"]})
 
     def edit(self, ops):
         delta, patch, _ = self._transaction(lambda: apply_ops(self.model, ops))

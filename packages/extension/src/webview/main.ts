@@ -10,7 +10,7 @@ import type {
   ModelSession,
   SessionState,
   SpatialNode,
-  ToolbarButtonHandle,
+  StatusItemHandle,
   ViewerViewState,
 } from '@vscode-ifc-viewer/core';
 import type {
@@ -22,6 +22,7 @@ import type {
   WebviewToHost,
 } from '../protocol.js';
 import { applyBridgeCommand, DEFAULT_HIGHLIGHT_LABEL, describeElement } from './bridgeOps.js';
+import { HostTabs } from './hostTabs.js';
 
 interface VsCodeApi {
   postMessage(message: WebviewToHost): void;
@@ -141,6 +142,10 @@ class RemoteSession implements ModelSession {
     else entry.reject(new Error(result.message));
   }
 
+  start(): void {
+    post({ type: 'startSession' });
+  }
+
   getProperties(expressID: number): Promise<ItemProperties> {
     return this.call('properties', { id: expressID });
   }
@@ -179,8 +184,24 @@ const CHIP_ICON =
   '<path d="M6.5 1.5v2.5M9.5 1.5v2.5M6.5 12v2.5M9.5 12v2.5M1.5 6.5H4M1.5 9.5H4M12 6.5h2.5M12 9.5h2.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>' +
   '</svg>';
 
-/** Created on the first session message, so a plain harness adds no button. */
-let engineButton: ToolbarButtonHandle | null = null;
+/** Created on the first session message, so a plain harness adds no item. */
+let engineItem: StatusItemHandle | null = null;
+let engineActionRegistered = false;
+
+function engineText(state: SessionState): string {
+  switch (state.state) {
+    case 'ready':
+      return 'IfcOpenShell';
+    case 'starting':
+      return 'IfcOpenShell starting';
+    case 'idle':
+      return 'Read-only';
+    case 'unavailable':
+      return 'Read-only';
+    default:
+      return 'web-ifc';
+  }
+}
 
 function engineLabel(state: SessionState): string {
   switch (state.state) {
@@ -188,6 +209,8 @@ function engineLabel(state: SessionState): string {
       return 'Editing engine: IfcOpenShell is ready. Properties and edits come from the live model. Click for details.';
     case 'starting':
       return 'Starting IfcOpenShell. The model is already viewable; editing becomes available shortly.';
+    case 'idle':
+      return 'Read-only for now. IfcOpenShell starts when you first edit a value, or click here to start it.';
     case 'unavailable':
       return `Read-only (web-ifc). ${state.detail ?? 'IfcOpenShell is not available.'} Click to set it up.`;
     default:
@@ -196,14 +219,33 @@ function engineLabel(state: SessionState): string {
 }
 
 function renderEngineButton(state: SessionState): void {
-  engineButton ??= viewer.addToolbarButton({
-    id: 'btn-engine',
-    label: engineLabel(state),
+  engineItem ??= viewer.addStatusItem({
+    id: 'engine',
+    text: engineText(state),
+    title: engineLabel(state),
     icon: CHIP_ICON,
-    onClick: () => post({ type: 'engineAction' }),
+    align: 'right',
+    onClick: () => viewer.showSidebarTab('engine'),
   });
-  engineButton?.setLabel(engineLabel(state));
-  engineButton?.setActive(state.state === 'ready');
+  if (!engineActionRegistered) {
+    engineActionRegistered = true;
+    viewer.registerAction({
+      id: 'engine.show',
+      label: 'Show editing engine',
+      group: 'Engine',
+      run: () => viewer.showSidebarTab('engine'),
+    });
+    viewer.registerAction({
+      id: 'engine.menu',
+      label: 'Editing engine: options and setup',
+      group: 'Engine',
+      run: () => post({ type: 'engineAction' }),
+    });
+  }
+  engineItem?.setText(engineText(state));
+  engineItem?.setTitle(engineLabel(state));
+  engineItem?.setActive(state.state === 'ready');
+  hostTabs.setSession(state);
 }
 
 /** Highlight group for elements an agent changed, so edits are easy to review. */
@@ -214,16 +256,33 @@ const agentChanged = new Set<number>();
 function markAgentChanges(delta: { changed: { id: number }[]; removed: number[] }): void {
   for (const id of delta.removed) agentChanged.delete(id);
   for (const change of delta.changed) agentChanged.add(change.id);
+  applyAgentHighlight();
+  hostTabs.setChanges(agentChanged.size, config.highlightAgentEdits);
+}
+
+/** Colour the changed elements when the setting is on; otherwise leave the model as it is. */
+function applyAgentHighlight(): void {
   if (agentChanged.size > 0 && config.highlightAgentEdits) {
     viewer.setHighlight(AGENT_EDIT_LABEL, [...agentChanged], AGENT_EDIT_COLOR);
+  } else {
+    viewer.clearHighlight(AGENT_EDIT_LABEL);
   }
 }
+
+/** The Agent tab's "Clear highlight": forget the changed elements and drop their colour. */
+function clearAgentChanges(): void {
+  agentChanged.clear();
+  viewer.clearHighlight(AGENT_EDIT_LABEL);
+  hostTabs.setChanges(0, config.highlightAgentEdits);
+}
+
+const hostTabs = new HostTabs(viewer, post, clearAgentChanges);
 
 // -- agent bridge -------------------------------------------------------------
 // Everything here is inert until the host reports a connection: no selection
 // messages, no GlobalId index, no state reports.
 let agent: AgentStatus = { available: false, connected: false };
-let config: WebviewConfig = { showLegend: true, revealHiddenCategories: true, highlightAgentEdits: true };
+let config: WebviewConfig = { showLegend: true, revealHiddenCategories: true, highlightAgentEdits: false };
 
 /** Agent highlight groups and isolate, kept by GlobalId so a reload can re-apply them. */
 const agentHighlights = new Map<string, { globalIds: string[]; color: string }>();
@@ -235,30 +294,53 @@ const PLUG_ICON =
   '<path d="M4 4.5h8v2.5a4 4 0 0 1-8 0V4.5Z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>' +
   '</svg>';
 
-/** Created on the first "available" status, so a disabled bridge adds no button. */
-let agentButton: ToolbarButtonHandle | null = null;
+/** Created on the first "available" status, so a disabled bridge adds no item. */
+let agentItem: StatusItemHandle | null = null;
+let removeAgentActions: (() => void)[] = [];
 
 function renderAgentButton(): void {
+  hostTabs.setAgent(agent);
   if (!agent.available) {
-    agentButton?.remove();
-    agentButton = null;
+    agentItem?.remove();
+    agentItem = null;
+    removeAgentActions.forEach((remove) => remove());
+    removeAgentActions = [];
     return;
   }
-  agentButton ??= viewer.addToolbarButton({
-    id: 'btn-agent',
-    label: 'Connect to agent',
+  agentItem ??= viewer.addStatusItem({
+    id: 'agent',
+    text: 'Agent',
     icon: PLUG_ICON,
-    onClick: () => post({ type: 'agentToggle' }),
+    align: 'right',
+    onClick: () => viewer.showSidebarTab('agent'),
   });
+  if (removeAgentActions.length === 0) {
+    removeAgentActions = [
+      viewer.registerAction({
+        id: 'agent.show',
+        label: 'Show agent connection',
+        group: 'Agent',
+        run: () => viewer.showSidebarTab('agent'),
+      }),
+      viewer.registerAction({
+        id: 'agent.toggle',
+        label: 'Connect or disconnect agent',
+        group: 'Agent',
+        enabled: () => !agent.blockedReason,
+        run: () => post({ type: 'agentToggle' }),
+      }),
+    ];
+  }
   const where = agent.folderName ? ` for "${agent.folderName}"` : '';
   const label = agent.blockedReason
     ? `Connect to agent: ${agent.blockedReason}`
     : agent.connected
       ? `Connected to agent${where}. Click to disconnect.`
       : `Connect to agent${where}: lets an AI agent see your selection and highlight elements (writes .ifc-skills/viewer/).`;
-  agentButton?.setLabel(label);
-  agentButton?.setActive(agent.connected);
-  agentButton?.setDisabled(Boolean(agent.blockedReason));
+  agentItem?.setText(agent.connected ? 'Agent connected' : 'Agent');
+  agentItem?.setTitle(label);
+  agentItem?.setActive(agent.connected);
+  agentItem?.setDisabled(Boolean(agent.blockedReason));
 }
 
 let selectionSeq = 0;
@@ -374,6 +456,7 @@ let pendingRestore: { view: ViewerViewState | null; selectedGlobalId: string | n
 
 async function runLoad({ source, fileName, isUrl, reload }: LoadRequest): Promise<void> {
   agentChanged.clear();
+  hostTabs.setChanges(0);
   if (!reload) {
     pendingRestore = null;
     agentHighlights.clear();
@@ -493,6 +576,9 @@ window.addEventListener('message', (event: MessageEvent<HostToWebview>) => {
     case 'config':
       config = msg.config;
       viewer.setHighlightLegendEnabled(config.showLegend);
+      // Turning the setting on or off applies to edits already made.
+      applyAgentHighlight();
+      hostTabs.setChanges(agentChanged.size, config.highlightAgentEdits);
       break;
     case 'session':
       viewer.setSession(remoteSession, msg.session);

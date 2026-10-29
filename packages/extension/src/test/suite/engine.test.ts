@@ -203,6 +203,58 @@ describe('live IfcOpenShell engine', function () {
     assert.strictEqual(loads, 0, 'saving must not reload the model');
   });
 
+  it('restores unsaved edits after the model server is killed', async () => {
+    const session = api.sessionFor(uri)!;
+    const edit = await session.edit([{ op: 'setAttribute', globalId: WALL, name: 'Name', value: 'Survives a crash' }], 'user');
+    const id = edit.delta!.changed[0].id;
+    assert.strictEqual(session.dirty, true);
+
+    await api.engine.manager.kill();
+    await until(() => session.state.state === 'ready' && session.dirty, 90000, 'session recovered with its edits');
+    const props = await session.read<{ attributes: { name: string; value: unknown }[] }>('properties', { id });
+    assert.strictEqual(props.attributes.find((a) => a.name === 'Name')?.value, 'Survives a crash');
+
+    // VS Code's own Undo still reaches the restored model.
+    await runEditorCommand('undo', () => !session.dirty);
+    const after = await session.read<{ attributes: { name: string; value: unknown }[] }>('properties', { id });
+    assert.notStrictEqual(after.attributes.find((a) => a.name === 'Name')?.value, 'Survives a crash');
+  });
+
+  it('stops a runaway script, restarts the server and keeps unsaved edits', async () => {
+    const session = api.sessionFor(uri)!;
+    const config = vscode.workspace.getConfiguration('ifcViewer');
+    await config.update('engine.scriptTimeoutSeconds', 5, vscode.ConfigurationTarget.Global);
+    try {
+      const edit = await session.edit([{ op: 'setAttribute', globalId: WALL, name: 'Name', value: 'Before the loop' }], 'user');
+      const id = edit.delta!.changed[0].id;
+      await assert.rejects(session.query('while True:\n    pass\n', 'runaway'), /ran longer than 5 s/);
+      assert.strictEqual(session.state.state, 'ready', 'the session came back');
+      assert.strictEqual(session.dirty, true, 'the unsaved edit is still there');
+      const props = await session.read<{ attributes: { name: string; value: unknown }[] }>('properties', { id });
+      assert.strictEqual(props.attributes.find((a) => a.name === 'Name')?.value, 'Before the loop');
+      await runEditorCommand('undo', () => !session.dirty);
+    } finally {
+      await config.update('engine.scriptTimeoutSeconds', undefined, vscode.ConfigurationTarget.Global);
+    }
+  });
+
+  it('frees a clean model on eviction and restarts it on demand', async () => {
+    const session = api.sessionFor(uri)!;
+    assert.strictEqual(session.dirty, false);
+    // A model with unsaved edits is never evicted.
+    await session.edit([{ op: 'setAttribute', globalId: WALL, name: 'Name', value: 'Unsaved' }], 'user');
+    assert.strictEqual(await session.evict(), false);
+    await runEditorCommand('undo', () => !session.dirty);
+
+    assert.strictEqual(await session.evict(), true);
+    assert.strictEqual(session.state.state, 'idle');
+    await assert.rejects(session.read('tree'), /not available/);
+    await session.start();
+    assert.strictEqual(session.state.state, 'ready');
+    const tree = await session.read<{ type: string }>('tree');
+    assert.strictEqual(tree.type, 'IfcProject');
+  });
+
   it('gives any agent or script live access through the Python client', async function () {
     assert.ok(fs.existsSync(path.join(bridgeDir, 'ifc_live.py')), 'client written on connect');
     const discovery = await api.engine.manager.discover();
@@ -330,6 +382,27 @@ describe('live IfcOpenShell engine', function () {
     assert.deepStrictEqual(offline.find((r) => r.id === 2).result.tools, []);
     const call = offline.find((r) => r.id === 3).result;
     assert.strictEqual(call.isError, true);
-    assert.match(call.content[0].text, /plug icon/);
+    assert.match(call.content[0].text, /Connect to agent/);
+  });
+
+  it('writes the MCP tools into the agent config files, keeping other servers', async function () {
+    const target = path.join(workspace, '.mcp.json');
+    fs.writeFileSync(target, JSON.stringify({ mcpServers: { other: { command: 'x' } } }), 'utf8');
+    try {
+      await vscode.commands.executeCommand('vscodeIfcViewer.addAgentTools', folder.uri, '.mcp.json');
+      const written = JSON.parse(fs.readFileSync(target, 'utf8'));
+      assert.deepStrictEqual(written.mcpServers.other, { command: 'x' });
+      assert.deepStrictEqual(written.mcpServers['ifc-viewer'], {
+        command: 'node',
+        args: ['.ifc-skills/viewer/mcp-shim.mjs'],
+      });
+
+      // A config that is not plain JSON is left exactly as it was.
+      fs.writeFileSync(target, '// mine\n{}', 'utf8');
+      await vscode.commands.executeCommand('vscodeIfcViewer.addAgentTools', folder.uri, '.mcp.json');
+      assert.strictEqual(fs.readFileSync(target, 'utf8'), '// mine\n{}');
+    } finally {
+      fs.rmSync(target, { force: true });
+    }
   });
 });

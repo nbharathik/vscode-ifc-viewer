@@ -53,7 +53,8 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
       highlightAgentEdits: settings.engine.highlightAgentEdits,
     }),
     toggleAgent: (uri) => void agentBridge.toggleFor(uri),
-    engineAction: (uri) => void engine.showMenu(provider.documentFor(uri)?.session?.state),
+    engineAction: (uri) => void engine.showMenu(provider.documentFor(uri)?.session ?? null),
+    visibilityChanged: (session, visible) => engine.visibilityChanged(session, visible),
   });
   const reloader = new AutoReloader(provider, () => settings, (uri) => agentBridge.isConnectedUri(uri));
 
@@ -88,6 +89,7 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
       const before = settings;
       settings = loadSettings();
       engine.applySettings();
+      provider.pushConfig();
       if (before.engine.python !== settings.engine.python) void engine.interpreterChanged();
       void agentBridge.applySettings();
     }),
@@ -140,6 +142,15 @@ export function activate(context: vscode.ExtensionContext): IfcViewerApi {
         return undefined;
       }
       return agentBridge.addInstructions(folder);
+    }),
+    vscode.commands.registerCommand('vscodeIfcViewer.addAgentTools', async (arg?: unknown, choice?: string) => {
+      const local = (vscode.workspace.workspaceFolders ?? []).filter((f) => f.uri.scheme === 'file');
+      const folder = await chooseFolder(arg, local);
+      if (!folder) {
+        void vscode.window.showInformationMessage('Open a local folder first.');
+        return undefined;
+      }
+      return agentBridge.addMcpConfig(folder, choice);
     }),
     vscode.commands.registerCommand('vscodeIfcViewer.disconnectAgent', async (arg?: unknown) => {
       const folder = await chooseFolder(arg, agentBridge.connectedFolders());

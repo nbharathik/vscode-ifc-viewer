@@ -7,7 +7,7 @@
 // so agent commands reach the right model.
 import * as vscode from 'vscode';
 import type { DocumentSession } from './server/documentSession.js';
-import { READ_ONLY_SESSION } from './protocol.js';
+import { READ_ONLY_SESSION, WEBVIEW_COMMANDS } from './protocol.js';
 import type {
   AgentStatus,
   BridgeAck,
@@ -41,6 +41,8 @@ export interface ProviderHooks {
   toggleAgent(uri: vscode.Uri): void;
   /** The toolbar's engine indicator was clicked. */
   engineAction(uri: vscode.Uri): void;
+  /** A tab was hidden or shown (hidden tabs eventually give their IfcOpenShell memory back). */
+  visibilityChanged(session: DocumentSession | null, visible: boolean): void;
 }
 
 /** Creates the editing session for a document (null when the engine setting is web-ifc). */
@@ -265,7 +267,9 @@ export class IfcEditorProvider implements vscode.CustomEditorProvider<IfcDocumen
           redo: async () => void (await session.redo()),
         }),
       );
-      void session.start();
+      // A model restored from a hot-exit backup holds unsaved work: start at
+      // once. Otherwise the session waits until the model is on screen.
+      if (backup) void session.start();
     }
     return document;
   }
@@ -409,7 +413,10 @@ export class IfcEditorProvider implements vscode.CustomEditorProvider<IfcDocumen
       if (this.panels.get(panel.key) === panel) this.panels.delete(panel.key);
       this.changeEmitter.fire({ panel, change: 'closed' });
     });
-    webviewPanel.onDidChangeViewState(() => this.changeEmitter.fire({ panel, change: 'focus' }));
+    webviewPanel.onDidChangeViewState(() => {
+      this.changeEmitter.fire({ panel, change: 'focus' });
+      this.hooks?.visibilityChanged(session, webviewPanel.visible);
+    });
 
     const distUri = vscode.Uri.joinPath(this.context.extensionUri, 'dist');
     // The document's directory is a resource root so the webview can stream
@@ -461,6 +468,8 @@ export class IfcEditorProvider implements vscode.CustomEditorProvider<IfcDocumen
         this.onLoaded(message.stats, panel);
         this.changeEmitter.fire({ panel, change: 'loaded' });
         panel.reloadInFlight = false;
+        // First paint is done: now IfcOpenShell may start (see DocumentSession.modelShown).
+        panel.session?.modelShown();
         break;
       case 'error':
         panel.loading = false;
@@ -495,6 +504,15 @@ export class IfcEditorProvider implements vscode.CustomEditorProvider<IfcDocumen
         break;
       case 'engineAction':
         this.hooks?.engineAction(panel.uri);
+        break;
+      case 'startSession':
+        void panel.session?.start();
+        break;
+      case 'command':
+        // Only the viewer's own commands, never an arbitrary id from the page.
+        if ((WEBVIEW_COMMANDS as readonly string[]).includes(message.command)) {
+          void vscode.commands.executeCommand(`vscodeIfcViewer.${message.command}`);
+        }
         break;
     }
   }
@@ -539,6 +557,13 @@ export class IfcEditorProvider implements vscode.CustomEditorProvider<IfcDocumen
     } catch (err) {
       panel.post({ type: 'rpcError', id, message: err instanceof Error ? err.message : String(err) });
     }
+  }
+
+  /** Send the current settings to every open viewer (after a settings change). */
+  pushConfig(): void {
+    if (!this.hooks) return;
+    const config = this.hooks.webviewConfig();
+    for (const panel of this.allPanels()) panel.post({ type: 'config', config });
   }
 
   private sendStatus(panel: ViewerPanel): void {

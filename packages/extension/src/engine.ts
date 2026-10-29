@@ -2,6 +2,7 @@
 // keeps the registry of live sessions, and owns the toolbar/command UI for
 // choosing the engine and setting it up.
 import * as vscode from 'vscode';
+import { statSync } from 'node:fs';
 import { DocumentSession } from './server/documentSession.js';
 import { ServerManager } from './server/serverManager.js';
 import { setupManagedPython } from './server/pythonSetup.js';
@@ -21,6 +22,17 @@ const MODE_LABELS: Record<EngineMode, { label: string; description: string }> = 
   },
 };
 
+/** Files under this size get their IfcOpenShell session as soon as they appear (engine.start = auto). */
+const AUTO_START_BELOW_MB = 30;
+
+function fileSizeMb(file: string): number {
+  try {
+    return statSync(file).size / (1024 * 1024);
+  } catch {
+    return 0;
+  }
+}
+
 export class EngineController implements SessionHost, vscode.Disposable {
   readonly manager: ServerManager;
   private readonly sessions = new Set<DocumentSession>();
@@ -34,8 +46,10 @@ export class EngineController implements SessionHost, vscode.Disposable {
   ) {
     this.manager = new ServerManager(context, settings, output);
     this.subscriptions.push(
+      // A crashed or killed server: every open model is reopened and its unsaved
+      // edits replayed from the session journal.
       this.manager.onDidExit(() => {
-        for (const session of this.sessions) session.markLost();
+        for (const session of this.sessions) void session.recover();
       }),
       vscode.workspace.onDidGrantWorkspaceTrust(() => {
         void vscode.window.showInformationMessage('Reopen your IFC files to enable editing in this trusted workspace.');
@@ -54,14 +68,43 @@ export class EngineController implements SessionHost, vscode.Disposable {
     // The model server runs a Python found on this machine; do not start it
     // for a workspace the user has not trusted.
     if (!vscode.workspace.isTrusted) return null;
+    const sizeMb = fileSizeMb(uri.fsPath);
+    const { start, maxFileSizeMb } = this.settings().engine;
+    // Small files are cheap to hold, so the session starts once they are on
+    // screen. Large ones wait until you need editing, so reading them costs
+    // nothing extra.
+    const startMode =
+      start === 'auto' ? (sizeMb < AUTO_START_BELOW_MB ? 'onOpen' : 'onDemand') : start;
     const session = new DocumentSession(
       this.manager,
       uri.toString(),
       (backup ?? uri).fsPath,
       uri.fsPath,
-      { allowScripts: () => this.scriptsAllowed() },
+      {
+        allowScripts: () => this.scriptsAllowed(),
+        startMode,
+        scriptTimeoutMs: () => this.settings().engine.scriptTimeoutSeconds * 1000,
+        log: (line) => this.output.appendLine(line),
+      },
       backup !== undefined,
     );
+    session.onDidRecover(({ restored, complete }) => {
+      void vscode.window.showInformationMessage(
+        complete
+          ? `IFC Viewer: IfcOpenShell restarted. ${restored > 0 ? `Your ${restored} unsaved change${restored === 1 ? ' was' : 's were'} restored.` : 'Nothing was lost.'}`
+          : 'IFC Viewer: IfcOpenShell restarted, but the edit history was too long to restore. Your unsaved edits in this file are lost.',
+      );
+    });
+    session.onDidWarn((message) => {
+      void vscode.window.showWarningMessage(`IFC Viewer: ${message}`, 'Show Log').then((pick) => {
+        if (pick) this.output.show(true);
+      });
+    });
+    if (sizeMb > maxFileSizeMb) {
+      session.disable(
+        `This file is ${Math.round(sizeMb)} MB, over the ${maxFileSizeMb} MB limit (ifcViewer.engine.maxFileSizeMb), so it stays read-only.`,
+      );
+    }
     this.sessions.add(session);
     session.onDidChangeState((state) => this.onSessionState(state));
     return session;
@@ -70,6 +113,33 @@ export class EngineController implements SessionHost, vscode.Disposable {
   /** Forget a session whose document closed. */
   release(session: DocumentSession): void {
     this.sessions.delete(session);
+    this.clearIdleTimer(session);
+  }
+
+  private readonly idleTimers = new Map<DocumentSession, ReturnType<typeof setTimeout>>();
+
+  private clearIdleTimer(session: DocumentSession): void {
+    const timer = this.idleTimers.get(session);
+    if (timer) clearTimeout(timer);
+    this.idleTimers.delete(session);
+  }
+
+  /**
+   * A tab was hidden or shown. A model that stays hidden for the configured
+   * time (and has no unsaved edits) gives its memory back; it restarts on use.
+   */
+  visibilityChanged(session: DocumentSession | null, visible: boolean): void {
+    if (!session) return;
+    this.clearIdleTimer(session);
+    const minutes = this.settings().engine.idleMinutes;
+    if (visible || minutes <= 0) return;
+    this.idleTimers.set(
+      session,
+      setTimeout(() => {
+        this.idleTimers.delete(session);
+        void session.evict();
+      }, minutes * 60_000),
+    );
   }
 
   private onSessionState(state: SessionState): void {
@@ -101,11 +171,18 @@ export class EngineController implements SessionHost, vscode.Disposable {
   }
 
   /** Toolbar indicator click: a menu that fits the current state. */
-  async showMenu(state: SessionState | undefined): Promise<void> {
+  async showMenu(session: DocumentSession | null): Promise<void> {
     type Item = vscode.QuickPickItem & { run: () => PromiseLike<unknown> | void };
     const items: Item[] = [];
+    const state: SessionState | undefined = session?.state;
     const ready = state?.state === 'ready';
-    if (ready) {
+    if (state?.state === 'idle') {
+      items.push({
+        label: '$(play) Start IfcOpenShell now',
+        description: 'enables editing and agent tools for this file',
+        run: () => session?.start(),
+      });
+    } else if (ready) {
       const s = this.manager.state;
       const detail = s.state === 'ready' ? `Python ${s.info.python}, IfcOpenShell ${s.info.ifcopenshell}` : undefined;
       items.push({ label: '$(check) IfcOpenShell is active', description: detail, run: () => undefined });

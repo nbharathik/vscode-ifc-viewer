@@ -2,7 +2,7 @@
   "name": "vscode-ifc-viewer",
   "displayName": "IFC Viewer",
   "description": "Open and explore IFC (.ifc) building models in a real 3D viewer inside VS Code: orbit, spatial tree, selection, properties and psets. Pairs with AI agents such as Claude Code to highlight elements by GlobalId.",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "publisher": "BharathikannanN",
   "license": "MIT",
   "engines": {
@@ -94,6 +94,11 @@
         "category": "IFC Viewer"
       },
       {
+        "command": "vscodeIfcViewer.addAgentTools",
+        "title": "Add Agent Tools (MCP)",
+        "category": "IFC Viewer"
+      },
+      {
         "command": "vscodeIfcViewer.disconnectAgent",
         "title": "Disconnect from Agent",
         "category": "IFC Viewer"
@@ -119,6 +124,42 @@
           "order": 20,
           "description": "How the IFC Viewer uses IfcOpenShell. Reopen IFC files after changing it."
         },
+        "ifcViewer.engine.start": {
+          "type": "string",
+          "enum": ["auto", "onOpen", "onDemand"],
+          "enumDescriptions": [
+            "Start IfcOpenShell when the file opens for files under 30 MB, and on first use for larger ones.",
+            "Always start IfcOpenShell once the model has appeared.",
+            "Start IfcOpenShell only when you first edit a value or an agent asks for the model."
+          ],
+          "default": "auto",
+          "order": 21,
+          "description": "When the IfcOpenShell session for a file starts. It always starts after the model has appeared, never before."
+        },
+        "ifcViewer.engine.maxFileSizeMb": {
+          "type": "integer",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 100000,
+          "order": 21,
+          "description": "Files larger than this stay read-only (web-ifc only), because IfcOpenShell needs roughly 8 to 10 times the file size in memory."
+        },
+        "ifcViewer.engine.scriptTimeoutSeconds": {
+          "type": "integer",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 3600,
+          "order": 21,
+          "description": "A script run by an agent or the Python client that takes longer than this is stopped. IfcOpenShell restarts and your unsaved edits are restored."
+        },
+        "ifcViewer.engine.idleMinutes": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 1440,
+          "order": 21,
+          "description": "A hidden IFC tab without unsaved edits frees its IfcOpenShell memory after this many minutes, and restarts it when needed. 0 never frees it."
+        },
         "ifcViewer.engine.python": {
           "type": "string",
           "default": "",
@@ -134,9 +175,9 @@
         },
         "ifcViewer.engine.highlightAgentEdits": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "order": 23,
-          "description": "Highlight the elements an agent changed through the live model, as the group \"Changed by agent\"."
+          "description": "Colour the elements an agent changed through the live model in amber (the group \"Changed by agent\"). Off by default so updates look clean; the Agent tab still counts the changed elements."
         },
         "ifcViewer.agentBridge.mcpTools": {
           "type": "boolean",
@@ -276,7 +317,7 @@
     "package": "node esbuild.mjs --production && vsce package --no-dependencies -o ../../"
   },
   "dependencies": {
-    "@vscode-ifc-viewer/core": "1.4.0"
+    "@vscode-ifc-viewer/core": "1.5.0"
   },
   "devDependencies": {
     "@types/mocha": "10.0.10",

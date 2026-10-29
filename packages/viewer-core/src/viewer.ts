@@ -11,6 +11,16 @@ import { Toolbar } from './panels/toolbar.js';
 import { StatsPanel } from './panels/stats.js';
 import { HighlightLegend } from './panels/legend.js';
 import type { ToolbarButtonHandle, ToolbarButtonSpec } from './panels/toolbar.js';
+import { Sidebar } from './panels/sidebar.js';
+import type { SidebarTabHandle, SidebarTabSpec } from './panels/sidebar.js';
+import { ViewTab } from './panels/viewTab.js';
+import { StatusBar } from './panels/statusbar.js';
+import type { StatusItemHandle, StatusItemSpec } from './panels/statusbar.js';
+import { CommandSearch } from './panels/commandSearch.js';
+import { ContextMenu } from './panels/contextMenu.js';
+import { Gizmo } from './panels/gizmo.js';
+import { ActionRegistry } from './commands/registry.js';
+import type { Action } from './commands/registry.js';
 import { PerfHud } from './panels/perfHud.js';
 import { LoadingOverlay, ErrorCard } from './panels/overlays.js';
 import { CancelledError } from './engine/types.js';
@@ -43,6 +53,9 @@ export type { CameraPose, ProjectionMode, SceneInfo, SectionAxis } from './scene
 export type { StandardView } from './scene/controls.js';
 export type { HighlightInfo } from './scene/highlights.js';
 export type { ToolbarButtonHandle, ToolbarButtonSpec } from './panels/toolbar.js';
+export type { StatusItemHandle, StatusItemSpec } from './panels/statusbar.js';
+export type { SidebarTabHandle, SidebarTabSpec } from './panels/sidebar.js';
+export type { Action } from './commands/registry.js';
 export type { SearchEntry, SearchIndex, StoreyInfo } from './search.js';
 export { buildSearchIndex, queryIndex } from './search.js';
 
@@ -104,7 +117,12 @@ export interface ViewerViewState {
   camera: CameraPose;
   projection: ProjectionMode;
   treeVisible: boolean;
+  /** The sidebar (named for the panel it replaced). */
   propertiesVisible: boolean;
+  /** The tool shelf. */
+  shelfVisible?: boolean;
+  /** Active sidebar tab id. */
+  sidebarTab?: string;
   section: { enabled: boolean; axis: SectionAxis; position: number; flipped: boolean };
   typeFilter: string[] | null;
   storeyFilter: number[] | null;
@@ -178,6 +196,31 @@ export interface Viewer {
   setHighlightLegendEnabled(enabled: boolean): void;
   /** Add an icon button to the toolbar; null when panels are not mounted. */
   addToolbarButton(spec: ToolbarButtonSpec): ToolbarButtonHandle | null;
+  /** Add an entry to the status bar; null when panels are not mounted. */
+  addStatusItem(spec: StatusItemSpec): StatusItemHandle | null;
+  /**
+   * Add an action to the command list (command search, shortcuts). Reusing an
+   * id replaces that action. Returns a function that removes it.
+   */
+  registerAction(action: Action): () => void;
+  /** Every registered action, in registration order. */
+  getActions(): Action[];
+  /** Run an action by id; false when it is unknown or disabled. */
+  runAction(id: string): boolean;
+  /** Open (or close) the command search. No-op when panels are not mounted. */
+  toggleCommandSearch(): void;
+  /**
+   * Add a tab to the sidebar; null when panels are not mounted. The returned
+   * `body` is the tab's content area, for the caller to fill.
+   */
+  addSidebarTab(spec: SidebarTabSpec): SidebarTabHandle | null;
+  /** Show the sidebar with this tab in front ("item", "view", "model", or a host tab). */
+  showSidebarTab(id: string): void;
+  getSidebarTab(): string | null;
+  /** The tool shelf (search, fit, hide, isolate, section), also toggled by T. */
+  setShelfVisible(visible: boolean): void;
+  isShelfVisible(): boolean;
+  toggleShelf(): void;
   /** Visibility. */
   hideSelected(): void;
   isolateSelected(): void;
@@ -264,6 +307,7 @@ const PROGRESSIVE_RENDER_INTERVAL = 150;
 /** Container classes applied while a side panel is hidden (see styles.ts). */
 const TREE_HIDDEN_CLASS = 'ifc-tree-hidden';
 const PROPS_HIDDEN_CLASS = 'ifc-props-hidden';
+const SHELF_HIDDEN_CLASS = 'ifc-shelf-hidden';
 
 function defaultSection(): SectionState {
   return { enabled: false, axis: 'y', position: 0, flipped: false, range: null };
@@ -274,11 +318,19 @@ class ViewerImpl implements Viewer {
   private readonly scene: SceneController;
   private readonly controls: ViewerControls;
   private readonly canvas: HTMLCanvasElement;
+  private readonly sidebar: Sidebar | null;
   private readonly propertiesPanel: PropertiesPanel | null;
+  private readonly viewTab: ViewTab | null;
   private readonly treePanel: TreePanel | null;
   private readonly toolbar: Toolbar | null;
   private readonly statsPanel: StatsPanel | null;
+  private shelfVisible = true;
   private readonly legend: HighlightLegend | null;
+  private readonly statusBar: StatusBar | null;
+  private readonly commandSearch: CommandSearch | null;
+  private readonly contextMenu: ContextMenu | null;
+  private readonly gizmo: Gizmo | null;
+  private readonly actions = new ActionRegistry();
   private readonly perfHud: PerfHud;
   private readonly loadingOverlay: LoadingOverlay;
   private readonly errorCard: ErrorCard;
@@ -331,20 +383,60 @@ class ViewerImpl implements Viewer {
     });
     this.controls = new ViewerControls(this.scene, this.container, () => this.scene.render(), {
       onPick: (pick) => this.select(pick ? pick.expressID : null),
-      onEscape: () => this.clearSelection(),
-      onHide: () => this.hideSelected(),
-      onIsolate: () => this.isolateSelected(),
-      onShowAll: () => this.showAll(),
-      onTogglePerfHud: () => this.togglePerfHud(),
+      onKey: (e) => {
+        const action = this.actions.forKey(e);
+        if (!action) return false;
+        if (this.actions.isEnabled(action)) action.run();
+        return true;
+      },
+      onContextMenu: (x, y, pick) => this.openContextMenu(x, y, pick),
       onInteractionEnd: () => this.emitViewChanged(),
     });
 
     const mountPanels = options.panels ?? true;
-    this.propertiesPanel = mountPanels ? new PropertiesPanel(this.container, this) : null;
+    this.sidebar = mountPanels ? new Sidebar(this.container, this) : null;
+    const itemTab = this.sidebar?.addTab({ id: 'item', label: 'Item', order: 10 });
+    const viewTab = this.sidebar?.addTab({ id: 'view', label: 'View', order: 20 });
+    const modelTab = this.sidebar?.addTab({ id: 'model', label: 'Model', order: 30 });
+    this.propertiesPanel = itemTab ? new PropertiesPanel(itemTab.body, this) : null;
+    this.viewTab = viewTab ? new ViewTab(viewTab.body, this) : null;
+    this.statsPanel = modelTab ? new StatsPanel(modelTab.body, this) : null;
+    this.sidebar?.onTabShown('model', () => this.statsPanel?.refresh());
+    this.onModelLoaded(() => this.statsPanel?.refresh());
     this.treePanel = mountPanels ? new TreePanel(this.container, this) : null;
     this.toolbar = mountPanels ? new Toolbar(this.container, this) : null;
-    this.statsPanel = mountPanels ? new StatsPanel(this.container, this) : null;
     this.legend = mountPanels ? new HighlightLegend(this.container, this) : null;
+    this.commandSearch = mountPanels ? new CommandSearch(this.container, this.actions) : null;
+    this.contextMenu = mountPanels ? new ContextMenu(this.container, this.actions) : null;
+    this.gizmo = mountPanels
+      ? new Gizmo(this.container, {
+          getCameraBasis: () => this.cameraBasis(),
+          setStandardView: (view) => this.setStandardView(view),
+        })
+      : null;
+    if (this.gizmo) this.scene.onRender(() => this.gizmo?.update());
+    this.statusBar = mountPanels
+      ? new StatusBar(this.container, {
+          getSelection: () => this.selection,
+          describeSelection: async (id) => {
+            const props = await this.getProperties(id);
+            if (!props) return null;
+            const name = props.attributes.find((a) => a.name === 'Name')?.value;
+            return { ifcClass: props.type, name: typeof name === 'string' && name !== '' ? name : null };
+          },
+          getTriangleCounts: () => {
+            if (!this.ready) return null;
+            const info = this.scene.getSceneInfo();
+            return { visible: info.visibleTriangleCount, total: info.triangleCount };
+          },
+          onSelectionChange: (l) => this.onSelectionChange(l),
+          onModelLoaded: (l) => this.onModelLoaded(l),
+          onVisibilityChange: (l) => this.onVisibilityChange(l),
+          onViewChanged: (l) => this.onViewChanged(l),
+          onModelEdited: (l) => this.onModelEdited(l),
+        })
+      : null;
+    this.registerBuiltinActions();
     this.perfHud = new PerfHud(this.container, {
       getRendererInfo: () => this.scene.getRendererInfo(),
       getRenderTiming: () => this.scene.getRenderTiming(),
@@ -459,7 +551,8 @@ class ViewerImpl implements Viewer {
     this.storeyFilter = null;
     this.scene.setFilter(null);
     this.toolbar?.syncSection();
-    this.toolbar?.syncFilters();
+    this.viewTab?.syncSection();
+    this.viewTab?.syncFilters();
 
     const normalized: LoadSource =
       source instanceof Uint8Array ? { kind: 'bytes', bytes: source } : source;
@@ -658,17 +751,49 @@ class ViewerImpl implements Viewer {
     return this.liveSession() !== null && this.sessionState.canEdit;
   }
 
+  canEnableEditing(): boolean {
+    return this.session !== null && this.sessionState.state === 'idle';
+  }
+
+  enableEditing(): void {
+    this.session?.start?.();
+  }
+
   editAttribute(expressID: number, name: string, value: string | null): Promise<void> {
     return this.editModel([{ op: 'setAttribute', id: expressID, name, value }]);
   }
 
   editProperty(
     expressID: number,
-    edit: { pset: string; psetId: number; kind: 'pset' | 'qto'; name: string; value: string | number | boolean | null },
+    edit: {
+      pset: string;
+      psetId: number;
+      kind: 'pset' | 'qto';
+      name: string;
+      value: string | number | boolean | null;
+      valueType?: string;
+    },
   ): Promise<void> {
     return this.editModel([
-      { op: 'setProperty', id: expressID, pset: edit.pset, psetId: edit.psetId, kind: edit.kind, name: edit.name, value: edit.value },
+      {
+        op: 'setProperty',
+        id: expressID,
+        pset: edit.pset,
+        psetId: edit.psetId,
+        kind: edit.kind,
+        name: edit.name,
+        value: edit.value,
+        ...(edit.valueType ? { valueType: edit.valueType } : {}),
+      },
     ]);
+  }
+
+  addPset(expressID: number, name: string): Promise<void> {
+    return this.editModel([{ op: 'addPset', id: expressID, pset: name }]);
+  }
+
+  removeProperty(expressID: number, edit: { pset: string; psetId: number; name: string }): Promise<void> {
+    return this.editModel([{ op: 'removeProperty', id: expressID, pset: edit.pset, psetId: edit.psetId, name: edit.name }]);
   }
 
   onModelChanged(listener: () => void): () => void {
@@ -834,6 +959,174 @@ class ViewerImpl implements Viewer {
 
   addToolbarButton(spec: ToolbarButtonSpec): ToolbarButtonHandle | null {
     return this.toolbar ? this.toolbar.addButton(spec) : null;
+  }
+
+  addStatusItem(spec: StatusItemSpec): StatusItemHandle | null {
+    return this.statusBar ? this.statusBar.addItem(spec) : null;
+  }
+
+  addSidebarTab(spec: SidebarTabSpec): SidebarTabHandle | null {
+    return this.sidebar ? this.sidebar.addTab(spec) : null;
+  }
+
+  showSidebarTab(id: string): void {
+    if (!this.sidebar?.hasTab(id)) return;
+    this.setPropertiesVisible(true);
+    this.sidebar.select(id);
+  }
+
+  getSidebarTab(): string | null {
+    return this.sidebar?.getActive() ?? null;
+  }
+
+  setShelfVisible(visible: boolean): void {
+    if (visible === this.shelfVisible) return;
+    this.shelfVisible = visible;
+    this.container.classList.toggle(SHELF_HIDDEN_CLASS, !visible);
+    this.emitViewChanged();
+  }
+
+  isShelfVisible(): boolean {
+    return this.shelfVisible;
+  }
+
+  toggleShelf(): void {
+    this.setShelfVisible(!this.shelfVisible);
+  }
+
+  registerAction(action: Action): () => void {
+    return this.actions.register(action);
+  }
+
+  getActions(): Action[] {
+    return this.actions.list();
+  }
+
+  runAction(id: string): boolean {
+    return this.actions.run(id);
+  }
+
+  toggleCommandSearch(): void {
+    this.commandSearch?.toggle();
+  }
+
+  /** The camera's right, up and backward directions in the scene (for the gizmo). */
+  private cameraBasis(): { right: [number, number, number]; up: [number, number, number]; back: [number, number, number] } {
+    const e = this.scene.camera.matrixWorld.elements;
+    return { right: [e[0], e[1], e[2]], up: [e[4], e[5], e[6]], back: [e[8], e[9], e[10]] };
+  }
+
+  /** Right-click: select what is under the pointer (or clear), then offer actions for it. */
+  private openContextMenu(x: number, y: number, pick: PickResult | null): void {
+    if (!this.contextMenu) return;
+    if (pick) this.select(pick.expressID);
+    else this.clearSelection();
+    const entries = this.selection !== null
+      ? ['visibility.hide', 'visibility.isolate', 'view.fitSelection', 'selection.showOnlyType', 'selection.copyGlobalId', '-', 'visibility.showAll', 'filters.reset', 'view.fit']
+      : ['visibility.showAll', 'filters.reset', 'view.fit', '-', 'search.open'];
+    this.contextMenu.open(x, y, entries);
+  }
+
+  /** Everything the toolbar buttons and keys do, in one list (see commands/registry.ts). */
+  private registerBuiltinActions(): void {
+    const add = (action: Action): void => void this.actions.register(action);
+    const hasSelection = (): boolean => this.selection !== null;
+    const hasModel = (): boolean => this.ready;
+
+    add({ id: 'search.open', label: 'Search commands', group: 'General', shortcut: 'F3', alsoBoundTo: ['ctrl+k'], run: () => this.toggleCommandSearch() });
+    add({ id: 'selection.clear', label: 'Clear selection', group: 'Selection', shortcut: 'Escape', enabled: hasSelection, run: () => this.clearSelection() });
+
+    add({ id: 'view.fit', label: 'Fit model', group: 'View', shortcut: 'F', enabled: hasModel, run: () => this.fitToModel() });
+    add({ id: 'view.fitSelection', label: 'Fit selection', group: 'View', shortcut: '.', enabled: hasSelection, run: () => this.fitToSelection() });
+    const views: [StandardView, string][] = [
+      ['iso', 'Isometric view'],
+      ['top', 'Top view'],
+      ['front', 'Front view'],
+      ['right', 'Right view'],
+      ['left', 'Left view'],
+      ['back', 'Back view'],
+      ['bottom', 'Bottom view'],
+    ];
+    for (const [view, label] of views) {
+      add({ id: `view.${view}`, label, group: 'View', enabled: hasModel, run: () => this.setStandardView(view) });
+    }
+    add({
+      id: 'view.projection',
+      label: 'Orthographic projection',
+      group: 'View',
+      checked: () => this.getProjection() === 'orthographic',
+      run: () => this.setProjection(this.getProjection() === 'orthographic' ? 'perspective' : 'orthographic'),
+    });
+
+    add({ id: 'visibility.hide', label: 'Hide selected', group: 'Visibility', shortcut: 'H', enabled: hasSelection, run: () => this.hideSelected() });
+    add({ id: 'visibility.isolate', label: 'Isolate selected', group: 'Visibility', shortcut: 'I', enabled: hasSelection, run: () => this.isolateSelected() });
+    const typeOfSelection = (): string | null => (this.selection === null ? null : (this.findNode(this.selection)?.type ?? null));
+    add({
+      id: 'selection.showOnlyType',
+      label: 'Show only this type',
+      group: 'Selection',
+      enabled: () => typeOfSelection() !== null,
+      run: () => {
+        const type = typeOfSelection();
+        if (type) this.setTypeFilter([type]);
+      },
+    });
+    add({
+      id: 'selection.copyGlobalId',
+      label: 'Copy GlobalId',
+      group: 'Selection',
+      enabled: hasSelection,
+      run: () => {
+        const id = this.selection;
+        if (id === null) return;
+        void this.globalIdOf(id)
+          .then((gid) => (gid ? navigator.clipboard?.writeText(gid) : undefined))
+          .catch(() => undefined);
+      },
+    });
+    add({ id: 'visibility.showAll', label: 'Show all', group: 'Visibility', shortcut: 'A', run: () => this.showAll() });
+    const categories: [LazyCategory, string][] = [
+      ['IfcSpace', 'Show spaces'],
+      ['IfcOpeningElement', 'Show openings'],
+    ];
+    for (const [category, label] of categories) {
+      add({
+        id: `visibility.${category}`,
+        label,
+        group: 'Visibility',
+        enabled: hasModel,
+        checked: () => this.isCategoryVisible(category),
+        run: () => void this.setCategoryVisible(category, !this.isCategoryVisible(category)),
+      });
+    }
+
+    add({
+      id: 'section.toggle',
+      label: 'Section plane',
+      group: 'Section',
+      enabled: hasModel,
+      checked: () => this.section.enabled,
+      run: () => this.setSectionEnabled(!this.section.enabled),
+    });
+    for (const axis of ['x', 'y', 'z'] as const) {
+      add({ id: `section.axis.${axis}`, label: `Section axis ${axis.toUpperCase()}`, group: 'Section', enabled: hasModel, checked: () => this.section.axis === axis, run: () => this.setSectionAxis(axis) });
+    }
+    add({ id: 'section.flip', label: 'Flip section side', group: 'Section', enabled: () => this.section.enabled, run: () => this.setSectionFlipped(!this.section.flipped) });
+    add({ id: 'section.reset', label: 'Reset section', group: 'Section', enabled: () => this.section.enabled, run: () => this.resetSection() });
+    add({ id: 'filters.reset', label: 'Reset filters', group: 'Filters', enabled: () => this.typeFilter !== null || this.storeyFilter !== null, run: () => this.resetFilters() });
+
+    add({ id: 'panel.tree', label: 'Spatial tree', group: 'Panels', shortcut: 'O', checked: () => this.treeVisible, run: () => this.toggleTree() });
+    add({ id: 'panel.properties', label: 'Sidebar', group: 'Panels', shortcut: 'N', checked: () => this.propsVisible, run: () => this.toggleProperties() });
+    add({ id: 'panel.shelf', label: 'Tool shelf', group: 'Panels', shortcut: 'T', checked: () => this.shelfVisible, run: () => this.toggleShelf() });
+    const tabs: [string, string][] = [
+      ['item', 'Item properties'],
+      ['view', 'View controls'],
+      ['model', 'Model statistics'],
+    ];
+    for (const [id, label] of tabs) {
+      add({ id: `sidebar.${id}`, label, group: 'Sidebar', run: () => this.showSidebarTab(id) });
+    }
+    add({ id: 'panel.perf', label: 'Performance overlay', group: 'Panels', shortcut: 'P', run: () => this.togglePerfHud() });
   }
 
   isIsolated(): boolean {
@@ -1004,12 +1297,12 @@ class ViewerImpl implements Viewer {
       );
     }
     this.scene.render();
-    this.toolbar?.syncFilters();
+    this.viewTab?.syncFilters();
     this.emitViewChanged();
   }
 
   showStatistics(): void {
-    this.statsPanel?.toggle();
+    this.showSidebarTab('model');
   }
 
   togglePerfHud(): void {
@@ -1143,6 +1436,7 @@ class ViewerImpl implements Viewer {
     }
     this.scene.render();
     this.toolbar?.syncSection();
+    this.viewTab?.syncSection();
     this.emitViewChanged();
   }
 
@@ -1214,7 +1508,7 @@ class ViewerImpl implements Viewer {
     if (mode === this.controls.getProjection()) return;
     this.controls.setProjection(mode);
     this.scene.render();
-    this.toolbar?.syncProjection();
+    this.viewTab?.syncProjection();
     this.emitViewChanged();
   }
 
@@ -1251,6 +1545,8 @@ class ViewerImpl implements Viewer {
       projection: this.getProjection(),
       treeVisible: this.treeVisible,
       propertiesVisible: this.propsVisible,
+      shelfVisible: this.shelfVisible,
+      sidebarTab: this.sidebar?.getActive() ?? undefined,
       section: {
         enabled: this.section.enabled,
         axis: this.section.axis,
@@ -1267,6 +1563,10 @@ class ViewerImpl implements Viewer {
     if (typeof state.treeVisible === 'boolean') this.setTreeVisible(state.treeVisible);
     if (typeof state.propertiesVisible === 'boolean') {
       this.setPropertiesVisible(state.propertiesVisible);
+    }
+    if (typeof state.shelfVisible === 'boolean') this.setShelfVisible(state.shelfVisible);
+    if (typeof state.sidebarTab === 'string' && this.sidebar?.hasTab(state.sidebarTab)) {
+      this.sidebar.select(state.sidebarTab);
     }
     if (state.projection === 'perspective' || state.projection === 'orthographic') {
       this.setProjection(state.projection);
@@ -1311,16 +1611,22 @@ class ViewerImpl implements Viewer {
     this.engine = null;
     this.initialized = null;
     this.propertiesPanel?.dispose();
+    this.viewTab?.dispose();
+    this.statsPanel?.dispose();
+    this.sidebar?.dispose();
     this.treePanel?.dispose();
     this.toolbar?.dispose();
-    this.statsPanel?.dispose();
     this.legend?.dispose();
+    this.commandSearch?.dispose();
+    this.contextMenu?.dispose();
+    this.gizmo?.dispose();
+    this.statusBar?.dispose();
     this.perfHud.dispose();
     this.loadingOverlay.dispose();
     this.errorCard.dispose();
     this.controls.dispose();
     this.scene.dispose();
-    this.container.classList.remove(TREE_HIDDEN_CLASS, PROPS_HIDDEN_CLASS);
+    this.container.classList.remove(TREE_HIDDEN_CLASS, PROPS_HIDDEN_CLASS, SHELF_HIDDEN_CLASS);
     if (this.canvas.parentElement === this.container) {
       this.container.removeChild(this.canvas);
     }

@@ -134,7 +134,8 @@ describe('agent bridge (file protocol)', function () {
     assert.strictEqual(a.ok, true, a.error ?? '');
     assert.strictEqual(a.applied, 1);
     assert.strictEqual(a.model, MODEL);
-    assert.strictEqual(fs.existsSync(inboxFile), false, 'the inbox file is removed');
+    // The viewer deletes the command right after writing its answer.
+    await waitFor(() => (fs.existsSync(inboxFile) ? undefined : true), 5000, 'the inbox file is removed');
     const s = await state((x) => x.models.some((m) => m.path === MODEL && m.loadedAt !== null), 'model loaded');
     assert.ok(typeof s.models[0].fileMtimeMs === 'number');
   });

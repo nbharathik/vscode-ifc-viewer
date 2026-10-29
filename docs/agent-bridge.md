@@ -8,8 +8,9 @@ the other. This page is the contract (protocol version 1).
 
 ## Connecting
 
-The bridge is off until the user clicks **Connect to agent** (the plug icon
-in the viewer toolbar) or runs **IFC Viewer: Connect to Agent**. While a
+The bridge is off until the user presses **Connect to agent** (in the viewer's
+Agent tab, opened by clicking **Agent** in the status bar) or runs **IFC Viewer:
+Connect to Agent**. While a
 folder is connected the viewer maintains:
 
 ```
@@ -45,7 +46,7 @@ Replaced atomically; written on connect, on every heartbeat, and within
 ```json
 {
   "protocol": 1,
-  "viewer": { "id": "BharathikannanN.vscode-ifc-viewer", "version": "1.4.0", "uriScheme": "vscode" },
+  "viewer": { "id": "BharathikannanN.vscode-ifc-viewer", "version": "1.5.0", "uriScheme": "vscode" },
   "open": true,
   "heartbeatAt": "2026-09-25T12:00:00.000Z",
   "heartbeatSeconds": 10,
@@ -165,26 +166,30 @@ The tool server listens on a loopback port that changes every session, behind a
 bearer token. `server.json` holds the current `url` and `token`, and
 `mcp-shim.mjs` is a dependency-free stdio shim (Node 18 or newer) that re-reads
 `server.json` on every message and forwards it. Register the shim once; it keeps
-working across sessions:
+working across sessions. The command **IFC Viewer: Add Agent Tools (MCP)** writes
+the entry into `.mcp.json` (Claude Code), `.cursor/mcp.json` (Cursor) or
+`.vscode/mcp.json` (Copilot in VS Code) and keeps the other servers in that file.
+By hand it is:
 
 ```json
 { "mcpServers": { "ifc-viewer": { "command": "node", "args": [".ifc-skills/viewer/mcp-shim.mjs"] } } }
 ```
 
 When the viewer is not connected the shim still starts, lists no tools, and
-tells the agent to click the plug icon.
+tells the agent to ask the user to connect from the Agent tab.
 
 | Tool | Effect |
 | --- | --- |
 | `get_state` | The same data as `state.json`. |
 | `open`, `reload`, `select`, `highlight`, `isolate`, `fit`, `clear` | The viewer ops above, validated the same way. |
 | `query` | Run a Python script against the live model (`model`, `ifcopenshell`, `api`, `element_util`). Edits it makes become one undoable change. |
-| `edit` | Typed edits: `setAttribute`, `setProperty`, `removePset`, `deleteProduct`, `setPlacement`, `assignContainer`, `assignType`, `createProduct`. All apply or none do. |
+| `edit` | Typed edits: `setAttribute`, `setProperty` (keeps the existing value type; a new property takes `valueType`: `text`, `number`, `boolean` or an IFC type such as `IfcLengthMeasure`), `addPset`, `removeProperty`, `removePset`, `deleteProduct`, `setPlacement`, `assignContainer`, `assignType`, `createProduct`. All apply or none do. |
 | `save` | Ask the user to write unsaved changes to disk. A modal prompt; the user may decline. |
 
-Edits change the model in memory: the viewer updates immediately, highlights
-the changed elements as the group "Changed by agent", and shows the file as
-unsaved. They reach disk only when the user saves, and each can be undone with
+Edits change the model in memory: the viewer updates immediately and shows the
+file as unsaved. The changed elements are coloured as the group "Changed by
+agent" only if the user turned on `ifcViewer.engine.highlightAgentEdits` (off by
+default). They reach disk only when the user saves, and each can be undone with
 the editor's Undo. `reload` is refused while a model has unsaved changes.
 
 ## Safety

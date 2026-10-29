@@ -1,6 +1,7 @@
 """Read side: spatial tree, properties and GlobalId lookups, shaped like the viewer's types."""
 import ifcopenshell
 import ifcopenshell.util.element as element_util
+import ifcopenshell.util.unit as unit_util
 
 
 def _scalar(value):
@@ -85,7 +86,16 @@ def _attributes(entity):
     return rows
 
 
-def _quantity_row(quantity):
+def _unit_symbol(model, prop):
+    """The project's symbol for this property's unit ("mm", "m2"), or None."""
+    try:
+        unit = unit_util.get_property_unit(prop, model)
+        return unit_util.get_unit_symbol(unit) if unit is not None else None
+    except Exception:
+        return None
+
+
+def _quantity_row(model, quantity):
     value = None
     unit = None
     for attr in ("LengthValue", "AreaValue", "VolumeValue", "CountValue", "WeightValue", "TimeValue"):
@@ -93,15 +103,16 @@ def _quantity_row(quantity):
             value = getattr(quantity, attr)
             unit = attr[: -len("Value")]
             break
-    return {"name": quantity.Name, "value": _json_value(value), "unit": unit}
+    return {"name": quantity.Name, "value": _json_value(value), "unit": _unit_symbol(model, quantity) or unit}
 
 
-def _property_row(prop):
+def _property_row(model, prop):
     name = prop.Name
     if prop.is_a("IfcPropertySingleValue"):
         nominal = prop.NominalValue
         value = _json_value(nominal.wrappedValue) if nominal is not None else None
-        return {"name": name, "value": value, "unit": _unit_of(nominal)}
+        # A measure (length, area, ...) shows its unit symbol; other values their IFC type.
+        return {"name": name, "value": value, "unit": _unit_symbol(model, prop) or _unit_of(nominal)}
     if prop.is_a("IfcPropertyEnumeratedValue"):
         values = [v.wrappedValue for v in (prop.EnumerationValues or [])]
         return {"name": name, "value": ", ".join(str(v) for v in values) if values else None, "unit": None}
@@ -123,10 +134,10 @@ def _pset_entry(model, pset_id):
     pset = model.by_id(pset_id)
     name = getattr(pset, "Name", None) or "Unnamed"
     if pset.is_a("IfcElementQuantity"):
-        rows = [_quantity_row(q) for q in (pset.Quantities or []) if q.Name]
+        rows = [_quantity_row(model, q) for q in (pset.Quantities or []) if q.Name]
         return {"expressID": pset_id, "name": name, "kind": "qto", "properties": rows}
     if hasattr(pset, "HasProperties"):
-        rows = [_property_row(p) for p in (pset.HasProperties or []) if p.Name]
+        rows = [_property_row(model, p) for p in (pset.HasProperties or []) if p.Name]
         return {"expressID": pset_id, "name": name, "kind": "pset", "properties": rows}
     return None
 

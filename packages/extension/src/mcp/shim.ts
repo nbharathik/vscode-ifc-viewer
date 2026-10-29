@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const NOT_CONNECTED =
-  'The IFC Viewer is not connected. Open the model in VS Code and click the plug icon (Connect to agent) in the viewer toolbar, then try again.';
+  'The IFC Viewer is not connected. Open the model in VS Code and click Agent in the status bar of the viewer (Connect to agent), then try again.';
 
 async function target() {
   try {

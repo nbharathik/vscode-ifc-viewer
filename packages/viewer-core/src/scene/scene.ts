@@ -450,6 +450,15 @@ export class SceneController {
     this.lastRenderMs = performance.now() - t0;
     this.renderTimestamps.push(t0);
     if (this.renderTimestamps.length > 240) this.renderTimestamps.shift();
+    for (const listener of this.renderListeners) listener();
+  }
+
+  private readonly renderListeners = new Set<() => void>();
+
+  /** Called after every frame (the orientation gizmo follows the camera this way). */
+  onRender(listener: () => void): () => void {
+    this.renderListeners.add(listener);
+    return () => this.renderListeners.delete(listener);
   }
 
   getSceneInfo(): SceneInfo {

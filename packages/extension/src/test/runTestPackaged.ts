@@ -5,7 +5,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { runTests } from '@vscode/test-electron';
-import { makeTestWorkspace } from './workspace';
+import { makeTestWorkspace, prepareFixtures } from './workspace';
 
 async function main(): Promise<void> {
   // Inherited from Electron-based terminals (IDE integrations); makes the
@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   fs.cpSync(path.join(extRoot, 'dist'), path.join(staged, 'dist'), { recursive: true });
   fs.cpSync(path.join(extRoot, 'media'), path.join(staged, 'media'), { recursive: true });
 
-  const fixtures = path.join(repoRoot, 'fixtures');
+  const fixtures = prepareFixtures(repoRoot);
   const workspace = makeTestWorkspace(fixtures);
 
   await runTests({

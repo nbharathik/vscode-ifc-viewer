@@ -38,6 +38,8 @@ export interface ViewerViewState {
   projection: ProjectionMode;
   treeVisible: boolean;
   propertiesVisible: boolean;
+  shelfVisible?: boolean;
+  sidebarTab?: string;
   section: { enabled: boolean; axis: SectionAxis; position: number; flipped: boolean };
   typeFilter: string[] | null;
   storeyFilter: number[] | null;
@@ -84,6 +86,10 @@ export interface HarnessHooks {
   setPropertiesVisible(visible: boolean): void;
   arePropertiesVisible(): boolean;
   /** Both panels at once (1.1.0-compatible convenience). */
+  setShelfVisible(visible: boolean): void;
+  isShelfVisible(): boolean;
+  showSidebarTab(id: string): void;
+  getSidebarTab(): string | null;
   setPanelsVisible(visible: boolean): void;
   arePanelsVisible(): boolean;
   togglePanels(): void;
@@ -129,6 +135,16 @@ export interface HarnessHooks {
   /** Adds a host toolbar button (testid "btn-test"); clicks are counted. */
   addTestToolbarButton(): void;
   getTestToolbarClicks(): number;
+  /** Registers a host action "Host test action" (id host.test); runs are counted. */
+  registerTestAction(): void;
+  getTestActionRuns(): number;
+  /** Adds a host sidebar tab "Demo" (badge "2", body text "Demo body"); returns false without panels. */
+  addTestSidebarTab(): boolean;
+  removeTestSidebarTab(): void;
+  /** Adds a host status item (testid "status-demo"); update or remove it by name. */
+  addTestStatusItem(): void;
+  updateTestStatusItem(text: string): void;
+  removeTestStatusItem(): void;
   /** True once the most recent load has fully rendered a frame. */
   isReady(): boolean;
   /** Render one frame (perf measurements). */
@@ -153,6 +169,10 @@ export interface HarnessHooks {
   applyDelta(delta: Delta, patch: GeometryPatch | null): void;
   /** Attach a fake editing session so the editable properties panel can be tested. */
   installStubSession(): void;
+  /** Like the stub session, but idle: editing starts on first use (on-demand mode). */
+  installIdleSession(): void;
+  /** How many times the idle session was asked to start. */
+  getSessionStarts(): number;
   /** Edit operations the stub session received, in order. */
   getEditLog(): unknown[];
   /** Number of onModelEdited events since the page loaded. */

@@ -608,14 +608,16 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Generate IFC fixtures.")
     parser.add_argument("--big", action="store_true", help="also generate big.ifc.gz")
     parser.add_argument("--only-big", action="store_true", help="generate only big.ifc.gz")
+    parser.add_argument("--out", help="write into this folder instead of fixtures/ (tests use a temp folder)")
     args = parser.parse_args(argv)
 
-    os.makedirs(FIXTURES_DIR, exist_ok=True)
+    out_dir = args.out or FIXTURES_DIR
+    os.makedirs(out_dir, exist_ok=True)
 
     if not args.only_big:
-        small = os.path.join(FIXTURES_DIR, "small.ifc")
-        edge = os.path.join(FIXTURES_DIR, "edge.ifc")
-        house = os.path.join(FIXTURES_DIR, "house.ifc")
+        small = os.path.join(out_dir, "small.ifc")
+        edge = os.path.join(out_dir, "edge.ifc")
+        house = os.path.join(out_dir, "house.ifc")
         build_small(small)
         build_edge(edge)
         build_house(house)
@@ -624,7 +626,7 @@ def main(argv: list[str]) -> int:
         print(f"wrote {house} ({os.path.getsize(house)} bytes)")
 
     if args.big or args.only_big:
-        big = os.path.join(FIXTURES_DIR, "big.ifc.gz")
+        big = os.path.join(out_dir, "big.ifc.gz")
         build_big(big)
         print(f"wrote {big} ({os.path.getsize(big)} bytes)")
 

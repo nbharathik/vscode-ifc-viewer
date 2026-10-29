@@ -26,6 +26,7 @@ export const INSTRUCTION_BLOCK = [
   AGENT_INSTRUCTION,
   'To query or edit the live model open in the viewer, use the Python client:',
   '`python .ifc-skills/viewer/ifc_live.py repl` (interactive) or `... query "<code>"` (one shot).',
+  'Save reusable scripts in `ifc-scripts/` and run them with `... query -f ifc-scripts/<file>.py`.',
   BLOCK_END,
 ].join('\n');
 
@@ -48,6 +49,39 @@ export function upsertInstructionBlock(existing: string): string {
   }
   const body = existing.replace(/\s+$/, '');
   return body === '' ? `${INSTRUCTION_BLOCK}\n` : `${body}\n\n${INSTRUCTION_BLOCK}\n`;
+}
+
+/** Name the viewer's tools are registered under in an agent's MCP configuration. */
+export const MCP_SERVER_NAME = 'ifc-viewer';
+
+/** MCP configuration files agents read, relative to the project root, and the key each keeps its servers under. */
+export const MCP_TARGETS: readonly { label: string; file: string; key: 'mcpServers' | 'servers'; detail: string }[] = [
+  { label: '.mcp.json', file: '.mcp.json', key: 'mcpServers', detail: 'Claude Code' },
+  { label: '.cursor/mcp.json', file: '.cursor/mcp.json', key: 'mcpServers', detail: 'Cursor' },
+  { label: '.vscode/mcp.json', file: '.vscode/mcp.json', key: 'servers', detail: 'GitHub Copilot in VS Code' },
+];
+
+/**
+ * Add the viewer's stdio shim to an MCP configuration file's text, keeping every
+ * other server. Returns undefined when the text is not plain JSON (for example it
+ * has comments), so the caller can leave the file alone instead of rewriting it.
+ */
+export function upsertMcpServer(existing: string, key: 'mcpServers' | 'servers'): string | undefined {
+  let root: Record<string, unknown> = {};
+  if (existing.trim() !== '') {
+    try {
+      const parsed: unknown = JSON.parse(existing);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+      root = parsed as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
+  }
+  const current = root[key];
+  if (current !== undefined && (typeof current !== 'object' || current === null || Array.isArray(current))) return undefined;
+  const servers = { ...(current as Record<string, unknown> | undefined) };
+  servers[MCP_SERVER_NAME] = { command: 'node', args: [BRIDGE_DIR.join('/') + '/mcp-shim.mjs'] };
+  return `${JSON.stringify({ ...root, [key]: servers }, null, 2)}\n`;
 }
 
 /** Fill the version stamp of the bundled guide template. */

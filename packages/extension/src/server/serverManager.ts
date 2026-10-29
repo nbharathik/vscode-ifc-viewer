@@ -155,6 +155,18 @@ export class ServerManager implements vscode.Disposable {
     }
   }
 
+  /**
+   * Kill the running server (a script that never ends) and wait for it to be
+   * gone. The next ensure() starts a fresh one, and the exit event lets every
+   * session recover.
+   */
+  async kill(): Promise<void> {
+    const server = this.server;
+    if (!server) return;
+    this.server = null;
+    await server.kill();
+  }
+
   /** Forget a failed discovery so the next ensure() looks again (after a setup or setting change). */
   async restart(): Promise<void> {
     this.stopping = true;

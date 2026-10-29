@@ -2,6 +2,8 @@
 // Run from the repo root with the harness serving on 4317:
 //   node scripts/capture-readme.mjs                          (viewer.png)
 //   node scripts/capture-readme.mjs docs/images/agent.png agent
+//   node scripts/capture-readme.mjs docs/images/search.png search
+//   node scripts/capture-readme.mjs docs/images/view.png view
 import { chromium } from '@playwright/test';
 
 const OUT = process.argv[2] ?? 'docs/images/viewer.png';
@@ -49,6 +51,17 @@ await page.evaluate(async (scene) => {
   viewer.select(wall);
   await viewer.getProperties(wall);
 }, SCENE);
+if (SCENE === 'view') {
+  await page.evaluate(() => {
+    window.__viewer.showSidebarTab('view');
+    window.__viewer.setSectionEnabled(true);
+  });
+}
+if (SCENE === 'search') {
+  await page.locator('canvas').focus();
+  await page.keyboard.press('F3');
+  await page.keyboard.type('s');
+}
 await page.waitForTimeout(600);
 await page.screenshot({ path: OUT });
 await browser.close();

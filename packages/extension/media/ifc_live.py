@@ -38,8 +38,8 @@ from pathlib import Path
 __all__ = ["connect", "Live", "NotConnected", "ViewerError", "QueryResult"]
 
 NOT_CONNECTED = (
-    "The IFC Viewer is not connected. Open the model in VS Code and click the plug icon "
-    "(Connect to agent) in the viewer toolbar, then try again."
+    "The IFC Viewer is not connected. Open the model in VS Code and click Agent in the "
+    "status bar of the viewer (Connect to agent), then try again."
 )
 
 
@@ -148,8 +148,9 @@ class Live:
         return QueryResult(self._call("query", code=code, keepVariables=True if keep else None, model=model))
 
     def edit(self, ops, model=None):
-        """Typed edits (setAttribute, setProperty, removePset, deleteProduct, setPlacement,
-        assignContainer, assignType, createProduct). All apply or none do."""
+        """Typed edits (setAttribute, setProperty, addPset, removeProperty, removePset,
+        deleteProduct, setPlacement, assignContainer, assignType, createProduct). All apply
+        or none do."""
         return self._call("edit", ops=ops, model=model)
 
     def highlight(self, global_ids, label=None, color=None, model=None):

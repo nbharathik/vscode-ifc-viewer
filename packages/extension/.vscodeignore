@@ -2,6 +2,7 @@
 # The extension ships only the esbuild bundles + wasm + media + docs.
 src/**
 out-test/**
+tests/**
 .vscode-test/**
 tsconfig*.json
 esbuild.mjs

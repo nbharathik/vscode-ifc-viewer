@@ -11,13 +11,18 @@ export interface PropertiesSource {
   getProperties(expressID: number): Promise<ItemProperties | null>;
   getSelection(): number | null;
   onSelectionChange(listener: (expressID: number | null) => void): () => void;
-  /** Panel visibility, driven by the header collapse and edge show buttons. */
-  arePropertiesVisible(): boolean;
-  setPropertiesVisible(visible: boolean): void;
   /** True while an editing session is up; value cells then accept edits. */
   canEdit?(): boolean;
+  /** True when editing is available but not started yet (on-demand sessions). */
+  canEnableEditing?(): boolean;
+  /** Start the idle editing session; cells become editable once it is ready. */
+  enableEditing?(): void;
   editAttribute?(expressID: number, name: string, value: string | null): Promise<void>;
   editProperty?(expressID: number, edit: PropertyEdit): Promise<void>;
+  /** Add an empty property set to an element. */
+  addPset?(expressID: number, name: string): Promise<void>;
+  /** Remove one property from a set the element owns. */
+  removeProperty?(expressID: number, edit: { pset: string; psetId: number; name: string }): Promise<void>;
   /** Re-render when the model was edited or the session changed. */
   onModelChanged?(listener: () => void): () => void;
 }
@@ -28,6 +33,30 @@ export interface PropertyEdit {
   kind: 'pset' | 'qto';
   name: string;
   value: string | number | boolean | null;
+  /** Set when a property is being created: "text", "number" or "boolean". */
+  valueType?: NewValueKind;
+}
+
+/** What the "Add property" row can create. */
+export type NewValueKind = 'text' | 'number' | 'boolean';
+
+/** A new property's text as a typed value; undefined when it does not fit the kind. */
+export function parseNewValue(text: string, kind: NewValueKind): string | number | boolean | undefined {
+  if (kind === 'boolean') {
+    const t = text.trim().toLowerCase();
+    return t === 'true' || t === 'yes' ? true : t === 'false' || t === 'no' ? false : undefined;
+  }
+  if (kind === 'number') {
+    if (text.trim() === '') return undefined;
+    const n = Number(text);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return text;
+}
+
+/** A unit symbol ("m", "mm", "kg") as opposed to an IFC type name ("IFCLABEL") or a quantity kind ("Length"). */
+export function isUnitSymbol(unit: string | null | undefined): unit is string {
+  return typeof unit === 'string' && /^[a-zµ°²³/%·^0-9-]{1,10}$/.test(unit);
 }
 
 /** Where a table's rows live, so an edit knows what to change. */
@@ -50,16 +79,6 @@ export function parseEdited(
   return text === '' && original === null ? null : text;
 }
 
-/** Header collapse chevron (points into the edge the panel leaves through). */
-const COLLAPSE_RIGHT_ICON =
-  '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.2 3.5 10.7 8l-4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-/** Edge button glyph: panel frame with the properties column filled. */
-const RAIL_PROPS_ICON =
-  '<svg viewBox="0 0 16 16" aria-hidden="true">' +
-  '<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2"/>' +
-  '<path d="M10.2 3.6h3.2v8.8h-3.2Z" fill="currentColor"/>' +
-  '</svg>';
-
 function formatValue(value: IfcProperty['value']): { text: string; isNull: boolean } {
   if (value === null || value === undefined) return { text: '—', isNull: true };
   if (typeof value === 'boolean') return { text: value ? 'true' : 'false', isNull: false };
@@ -72,8 +91,6 @@ export class PropertiesPanel {
   readonly root: HTMLElement;
   private readonly body: HTMLElement;
   private readonly searchInput: HTMLInputElement;
-  private collapseBtn!: HTMLButtonElement;
-  private railBtn!: HTMLButtonElement;
   private readonly unsubscribe: () => void;
   /** Guards against out-of-order async property responses. */
   private renderSeq = 0;
@@ -89,40 +106,10 @@ export class PropertiesPanel {
     const doc = container.ownerDocument;
     ensurePanelStyles(doc);
 
+    // The sidebar owns the panel chrome (header, collapse, edge button); this is its Item tab.
     this.root = doc.createElement('div');
-    this.root.className = 'ifc-panel ifc-panel--right';
+    this.root.className = 'ifc-tab';
     this.root.setAttribute('data-testid', 'properties-panel');
-
-    // Header: title on the left, the collapse control right-aligned beside it.
-    const header = doc.createElement('div');
-    header.className = 'ifc-panel__header';
-    const title = doc.createElement('span');
-    title.textContent = 'Properties';
-    this.collapseBtn = doc.createElement('button');
-    this.collapseBtn.className = 'ifc-panel__collapse';
-    this.collapseBtn.setAttribute('data-testid', 'btn-props-collapse');
-    this.collapseBtn.title = 'Hide properties';
-    this.collapseBtn.setAttribute('aria-label', 'Hide properties');
-    this.collapseBtn.innerHTML = COLLAPSE_RIGHT_ICON;
-    this.collapseBtn.addEventListener('click', () => {
-      this.source.setPropertiesVisible(false);
-      this.railBtn.focus();
-    });
-    header.append(title, this.collapseBtn);
-    this.root.appendChild(header);
-
-    // Edge button shown while the panel is hidden (via the container class).
-    this.railBtn = doc.createElement('button');
-    this.railBtn.className = 'ifc-panel-rail ifc-panel-rail--right';
-    this.railBtn.setAttribute('data-testid', 'btn-props-show');
-    this.railBtn.title = 'Show properties';
-    this.railBtn.setAttribute('aria-label', 'Show properties');
-    this.railBtn.innerHTML = RAIL_PROPS_ICON;
-    this.railBtn.addEventListener('click', () => {
-      this.source.setPropertiesVisible(true);
-      this.collapseBtn.focus();
-    });
-    container.appendChild(this.railBtn);
 
     // Local search over the rendered rows; persists across selections.
     const search = doc.createElement('div');
@@ -158,7 +145,7 @@ export class PropertiesPanel {
     this.root.appendChild(this.body);
 
     container.appendChild(this.root);
-
+    // Rows are hidden-safe: render now so a selection made before the tab is opened is ready.
     void this.render(this.source.getSelection());
     this.unsubscribe = this.source.onSelectionChange((id) => void this.render(id));
     this.unsubscribeModel = this.source.onModelChanged?.(() => {
@@ -248,6 +235,9 @@ export class PropertiesPanel {
     for (const pset of props.psets) {
       this.body.appendChild(this.renderPset(pset, props.expressID));
     }
+    if (this.source.canEdit?.() && this.source.addPset) {
+      this.body.appendChild(this.renderAddPset(props.expressID));
+    }
     this.hasContent = true;
     // Keep the active filter applied to the freshly rendered rows.
     if (this.searchInput.value.trim() !== '') this.applyFilter();
@@ -295,12 +285,178 @@ export class PropertiesPanel {
     } else {
       section.appendChild(this.renderTable(pset.properties, `pset:${pset.name}`, { kind: 'pset', pset }, ownerId));
     }
+    if (this.source.canEdit?.() && pset.kind === 'pset') section.appendChild(this.renderAddProperty(pset, ownerId));
     return section;
+  }
+
+  /** Report an edit that failed, in the panel, for a few seconds. */
+  private notice(message: string): void {
+    const doc = this.root.ownerDocument;
+    this.body.querySelector('.ifc-notice')?.remove();
+    const el = doc.createElement('div');
+    el.className = 'ifc-notice';
+    el.setAttribute('role', 'alert');
+    el.setAttribute('data-testid', 'props-notice');
+    el.textContent = message;
+    this.body.prepend(el);
+    window.setTimeout(() => el.remove(), 6000);
+  }
+
+  private run(action: Promise<void> | undefined): void {
+    void (action ?? Promise.reject(new Error('Editing is not available.'))).catch((err: unknown) =>
+      this.notice(err instanceof Error ? err.message : String(err)),
+    );
+  }
+
+  /** "+ Add property" under a set: a small form (name, type, value) that opens in place. */
+  private renderAddProperty(pset: IfcPropertySet, ownerId: number): HTMLElement {
+    const doc = this.root.ownerDocument;
+    const wrap = doc.createElement('div');
+    wrap.className = 'ifc-add';
+    const open = doc.createElement('button');
+    open.className = 'ifc-add__open';
+    open.setAttribute('data-testid', `add-property-${pset.name}`);
+    open.textContent = '+ Add property';
+    wrap.appendChild(open);
+
+    open.addEventListener('click', () => {
+      open.hidden = true;
+      this.editing = true;
+      const form = doc.createElement('form');
+      form.className = 'ifc-add__form';
+      const name = doc.createElement('input');
+      name.placeholder = 'Name';
+      name.setAttribute('data-testid', 'add-property-name');
+      name.setAttribute('aria-label', 'Property name');
+      const kind = doc.createElement('select');
+      kind.setAttribute('data-testid', 'add-property-type');
+      kind.setAttribute('aria-label', 'Value type');
+      for (const [value, label] of [['text', 'Text'], ['number', 'Number'], ['boolean', 'Yes/No']] as const) {
+        const option = doc.createElement('option');
+        option.value = value;
+        option.textContent = label;
+        kind.appendChild(option);
+      }
+      const value = doc.createElement('input');
+      value.placeholder = 'Value';
+      value.setAttribute('data-testid', 'add-property-value');
+      value.setAttribute('aria-label', 'Value');
+      kind.addEventListener('change', () => {
+        value.placeholder = kind.value === 'boolean' ? 'true or false' : kind.value === 'number' ? '0' : 'Value';
+      });
+      const add = doc.createElement('button');
+      add.type = 'submit';
+      add.textContent = 'Add';
+      add.setAttribute('data-testid', 'add-property-submit');
+      const cancel = doc.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'Cancel';
+      const close = (): void => {
+        form.remove();
+        open.hidden = false;
+        this.editing = false;
+      };
+      cancel.addEventListener('click', close);
+      form.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          close();
+        }
+      });
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const trimmed = name.value.trim();
+        const typed = parseNewValue(value.value, kind.value as NewValueKind);
+        if (!trimmed) {
+          name.classList.add('ifc-edit-invalid');
+          return;
+        }
+        if (typed === undefined) {
+          value.classList.add('ifc-edit-invalid');
+          value.title = kind.value === 'boolean' ? 'Enter true or false' : 'Enter a number';
+          return;
+        }
+        close();
+        this.run(
+          this.source.editProperty?.(ownerId, {
+            pset: pset.name,
+            psetId: pset.expressID,
+            kind: pset.kind,
+            name: trimmed,
+            value: typed,
+            valueType: kind.value as NewValueKind,
+          }),
+        );
+      });
+      form.append(name, kind, value, add, cancel);
+      wrap.appendChild(form);
+      name.focus();
+    });
+    return wrap;
+  }
+
+  /** "+ Add property set" at the end of the panel. */
+  private renderAddPset(ownerId: number): HTMLElement {
+    const doc = this.root.ownerDocument;
+    const wrap = doc.createElement('div');
+    wrap.className = 'ifc-add ifc-add--pset';
+    const open = doc.createElement('button');
+    open.className = 'ifc-add__open';
+    open.setAttribute('data-testid', 'add-pset');
+    open.textContent = '+ Add property set';
+    wrap.appendChild(open);
+    open.addEventListener('click', () => {
+      open.hidden = true;
+      this.editing = true;
+      const form = doc.createElement('form');
+      form.className = 'ifc-add__form';
+      const name = doc.createElement('input');
+      name.placeholder = 'Pset_Custom';
+      name.setAttribute('data-testid', 'add-pset-name');
+      name.setAttribute('aria-label', 'Property set name');
+      const add = doc.createElement('button');
+      add.type = 'submit';
+      add.textContent = 'Add';
+      add.setAttribute('data-testid', 'add-pset-submit');
+      const cancel = doc.createElement('button');
+      cancel.type = 'button';
+      cancel.textContent = 'Cancel';
+      const close = (): void => {
+        form.remove();
+        open.hidden = false;
+        this.editing = false;
+      };
+      cancel.addEventListener('click', close);
+      form.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          close();
+        }
+      });
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const trimmed = name.value.trim();
+        if (!trimmed) {
+          name.classList.add('ifc-edit-invalid');
+          return;
+        }
+        close();
+        this.run(this.source.addPset?.(ownerId, trimmed));
+      });
+      form.append(name, add, cancel);
+      wrap.appendChild(form);
+      name.focus();
+    });
+    return wrap;
   }
 
   /** Can this row be edited? Never GlobalId; only plain scalars. */
   private isEditable(row: IfcProperty, target: EditTarget): boolean {
-    if (!this.source.canEdit?.()) return false;
+    return Boolean(this.source.canEdit?.()) && this.wouldBeEditable(row, target);
+  }
+
+  /** The row's own rules for editing, independent of whether a session is up. */
+  private wouldBeEditable(row: IfcProperty, target: EditTarget): boolean {
     if (target.kind === 'attr') {
       return row.name !== 'GlobalId' && (typeof row.value === 'string' || row.value === null);
     }
@@ -319,18 +475,57 @@ export class PropertiesPanel {
       const val = doc.createElement('td');
       val.className = 'ifc-val';
       val.setAttribute('data-prop', `${scope}.${row.name}`);
-      const { text, isNull } = formatValue(row.value);
-      val.textContent = text;
-      if (isNull) val.classList.add('ifc-null');
+      this.fillValue(val, row);
       if (this.isEditable(row, target)) {
         val.classList.add('ifc-val--editable');
         val.title = 'Double-click to edit';
         val.addEventListener('dblclick', () => this.beginEdit(val, row, target, ownerId));
+      } else if (this.source.canEnableEditing?.() && this.wouldBeEditable(row, target)) {
+        // On-demand session: the first double-click starts IfcOpenShell, and
+        // the panel re-renders with editable cells when it is ready.
+        val.classList.add('ifc-val--enable');
+        val.title = 'Double-click to enable editing (starts IfcOpenShell)';
+        val.addEventListener('dblclick', () => this.source.enableEditing?.());
       }
       tr.append(key, val);
+      // A property of a set can be removed; attributes and read-only rows cannot.
+      if (target.kind === 'pset' && this.source.canEdit?.() && this.source.removeProperty && target.pset.kind === 'pset') {
+        const actions = doc.createElement('td');
+        actions.className = 'ifc-row-actions';
+        const remove = doc.createElement('button');
+        remove.className = 'ifc-row-remove';
+        remove.title = `Remove ${row.name}`;
+        remove.setAttribute('aria-label', `Remove ${row.name}`);
+        remove.setAttribute('data-testid', `remove-${target.pset.name}.${row.name}`);
+        remove.textContent = '×';
+        remove.addEventListener('click', () =>
+          this.run(
+            this.source.removeProperty?.(ownerId, {
+              pset: target.pset.name,
+              psetId: target.pset.expressID,
+              name: row.name,
+            }),
+          ),
+        );
+        actions.appendChild(remove);
+        tr.appendChild(actions);
+      }
       table.appendChild(tr);
     }
     return table;
+  }
+
+  /** A value cell's text, with the unit symbol after it when the property has one. */
+  private fillValue(cell: HTMLElement, row: IfcProperty): void {
+    const { text, isNull } = formatValue(row.value);
+    cell.textContent = text;
+    cell.classList.toggle('ifc-null', isNull);
+    if (!isNull && isUnitSymbol(row.unit) && typeof row.value === 'number') {
+      const unit = cell.ownerDocument.createElement('span');
+      unit.className = 'ifc-unit';
+      unit.textContent = ` ${row.unit}`;
+      cell.appendChild(unit);
+    }
   }
 
   /** Swap a value cell for an input; Enter commits, Escape or blur cancels. */
@@ -352,9 +547,7 @@ export class PropertiesPanel {
       if (finished) return;
       finished = true;
       this.editing = false;
-      const { text, isNull } = formatValue(row.value);
-      cell.textContent = text;
-      cell.classList.toggle('ifc-null', isNull);
+      this.fillValue(cell, row);
     };
     const commit = (): void => {
       if (finished) return;
@@ -389,9 +582,13 @@ export class PropertiesPanel {
         .catch((err: unknown) => {
           finished = false;
           this.editing = false;
-          cell.title = err instanceof Error ? err.message : String(err);
+          const message = err instanceof Error ? err.message : String(err);
+          cell.title = message;
           restore();
           cell.classList.add('ifc-edit-failed');
+          // The server explains why (a value that does not fit the type, an
+          // enumeration), and that deserves more than a tooltip.
+          this.notice(message);
         });
     };
     input.addEventListener('keydown', (e) => {
@@ -411,7 +608,6 @@ export class PropertiesPanel {
     if (this.searchTimer !== null) window.clearTimeout(this.searchTimer);
     this.unsubscribe();
     this.unsubscribeModel?.();
-    this.railBtn.remove();
     this.root.remove();
   }
 }

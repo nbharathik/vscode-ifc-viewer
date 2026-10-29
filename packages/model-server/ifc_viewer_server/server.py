@@ -10,6 +10,7 @@ from .document import Document
 from .framing import read_message, write_message
 from .geometry import GeometryIds
 from .ops import OpError
+from .system import lower_priority, resident_mb
 
 ERR_INVALID = -32602
 ERR_METHOD = -32601
@@ -43,28 +44,32 @@ class Server:
             "ifcopenshell": ifcopenshell.version,
             "python": sys.version.split()[0],
             "pid": os.getpid(),
+            "memoryMb": resident_mb(),
         }
 
     def m_open(self, params):
         key, path = params.get("doc"), params.get("path")
         if not key or not path:
             raise RpcError(ERR_INVALID, '"doc" and "path" are required')
-        if key in self.documents:
-            self.documents.pop(key)
+        previous = self.documents.pop(key, None)
+        if previous is not None:
+            previous.release()
         self.documents[key] = Document(
             key, path, self.geometry_ids, params.get("savePath"), bool(params.get("dirty", False))
         )
-        return self.documents[key].info()
+        return {**self.documents[key].info(), "memoryMb": resident_mb()}
 
     def m_close(self, params):
-        self.documents.pop(params.get("doc"), None)
+        document = self.documents.pop(params.get("doc"), None)
+        if document is not None:
+            document.release()
         return {"closed": True}
 
     def m_info(self, params):
         return self.doc(params).info()
 
     def m_status(self, params):
-        return self.doc(params).status()
+        return {**self.doc(params).status(), "memoryMb": resident_mb()}
 
     def m_tree(self, params):
         return self.doc(params).tree()
@@ -139,6 +144,8 @@ def main():
     # Keep the protocol channel clean: scripts and libraries that print must
     # not corrupt the framing, so stdout is redirected to stderr and the real
     # stdout is held privately.
+    # The viewer is the foreground job; loading a model here must never slow its first paint.
+    lower_priority()
     protocol_out = os.fdopen(os.dup(sys.stdout.fileno()), "wb")
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     sys.stdout = sys.stderr

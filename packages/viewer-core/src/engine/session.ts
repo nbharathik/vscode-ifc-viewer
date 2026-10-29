@@ -15,7 +15,11 @@ export type EditOp =
       name: string;
       value: string | number | boolean | null;
       kind?: 'pset' | 'qto';
+      /** Type for a new property: "text", "number", "boolean", or an IFC type such as IfcLengthMeasure. */
+      valueType?: string;
     }
+  | { op: 'addPset'; id?: number; globalId?: string; pset: string; kind?: 'pset' | 'qto' }
+  | { op: 'removeProperty'; id?: number; globalId?: string; pset?: string; psetId?: number; name: string }
   | { op: 'removePset'; id?: number; globalId?: string; psetId: number }
   | { op: 'deleteProduct'; id?: number; globalId?: string }
   | { op: 'setPlacement'; id?: number; globalId?: string; location?: number[]; matrix?: number[] }
@@ -29,6 +33,8 @@ export interface DeltaChange {
   ifcClass: string;
   properties: boolean;
   geometry: boolean;
+  /** Only the placement changed: the element's shape is the same. */
+  placementOnly?: boolean;
   relationships: boolean;
   created: boolean;
 }
@@ -77,7 +83,8 @@ export interface GeometryPatch {
 export type DeltaSource = 'user' | 'agent' | 'undo' | 'redo' | 'revert';
 
 export interface SessionState {
-  state: 'off' | 'starting' | 'ready' | 'unavailable';
+  /** `idle`: not started yet, it starts on first use (large files, or the on-demand setting). */
+  state: 'off' | 'idle' | 'starting' | 'ready' | 'unavailable';
   /** Which engine feeds the data panels and edits. */
   engine: 'ifcopenshell' | 'web-ifc';
   canQuery: boolean;
@@ -95,6 +102,8 @@ export const READ_ONLY_SESSION: SessionState = {
 
 /** Data side of a model: properties, tree, ids and edits. */
 export interface ModelSession {
+  /** Ask the host to start an idle session (on-demand mode). No-op otherwise. */
+  start?(): void;
   getProperties(expressID: number): Promise<ItemProperties>;
   getTree(): Promise<SpatialNode>;
   resolveGlobalIds(globalIds: readonly string[]): Promise<GlobalIdResolution>;

@@ -12,7 +12,9 @@ import {
   GUIDE_FILE,
   INSTRUCTION_BLOCK,
   INSTRUCTION_TARGETS,
+  MCP_TARGETS,
   upsertInstructionBlock,
+  upsertMcpServer,
   PROTOCOL_VERSION,
   buildState,
   isInside,
@@ -248,6 +250,34 @@ export class AgentBridge implements vscode.Disposable {
     void vscode.window.showInformationMessage(`Added the IFC Viewer lines to ${picked.file}.`, 'Open').then((open) => {
       if (open) void vscode.commands.executeCommand('vscode.open', vscode.Uri.file(target));
     });
+    return target;
+  }
+
+  /** Register the viewer's tools in an agent's MCP configuration file (.mcp.json, Cursor, Copilot). */
+  async addMcpConfig(folder: vscode.WorkspaceFolder, choice?: string): Promise<string | undefined> {
+    const picked = choice
+      ? MCP_TARGETS.find((t) => t.file === choice)
+      : await vscode.window.showQuickPick(
+          MCP_TARGETS.map((t) => ({ label: t.label, description: t.detail, file: t.file, key: t.key })),
+          { placeHolder: 'Which agent should get the IFC Viewer tools?' },
+        );
+    if (!picked) return undefined;
+    const target = path.join(folder.uri.fsPath, ...picked.file.split('/'));
+    const existing = await fs.readFile(target, 'utf8').catch(() => '');
+    const text = upsertMcpServer(existing, picked.key);
+    if (text === undefined) {
+      void vscode.window.showWarningMessage(
+        `IFC Viewer: ${picked.file} is not plain JSON, so it was left unchanged. Add the "ifc-viewer" server by hand (see .ifc-skills/viewer/SKILL.md).`,
+      );
+      return undefined;
+    }
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, text, 'utf8');
+    void vscode.window
+      .showInformationMessage(`Registered the IFC Viewer tools in ${picked.file}. Restart the agent to pick them up.`, 'Open')
+      .then((open) => {
+        if (open) void vscode.commands.executeCommand('vscode.open', vscode.Uri.file(target));
+      });
     return target;
   }
 
@@ -521,8 +551,9 @@ class FolderConnection {
           version: this.viewerInfo.version,
           instructions:
             'Tools for the IFC model the user has open in their editor. Answer questions from the model with query, ' +
-            'never from memory. Show results with highlight and select. Edits are applied to the live model, ' +
-            'highlighted for the user, and only reach the file when the user saves. Read .ifc-skills/viewer/SKILL.md for details.',
+            'never from memory. Show results with highlight and select. Edits are applied to the live model ' +
+            'and only reach the file when the user saves; they are not coloured unless the user turned that on, ' +
+            'so highlight what you changed. Keep reusable scripts in ifc-scripts/. Read .ifc-skills/viewer/SKILL.md for details.',
         },
         buildTools(this.toolHost()),
       );

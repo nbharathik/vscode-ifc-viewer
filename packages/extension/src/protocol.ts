@@ -19,7 +19,11 @@ export type EditOp =
       name: string;
       value: string | number | boolean | null;
       kind?: 'pset' | 'qto';
+      /** Type for a new property: "text", "number", "boolean", or an IFC type such as IfcLengthMeasure. */
+      valueType?: string;
     }
+  | { op: 'addPset'; id?: number; globalId?: string; pset: string; kind?: 'pset' | 'qto' }
+  | { op: 'removeProperty'; id?: number; globalId?: string; pset?: string; psetId?: number; name: string }
   | { op: 'removePset'; id?: number; globalId?: string; psetId: number }
   | { op: 'deleteProduct'; id?: number; globalId?: string }
   | { op: 'setPlacement'; id?: number; globalId?: string; location?: number[]; matrix?: number[] }
@@ -33,6 +37,8 @@ export interface DeltaChange {
   ifcClass: string;
   properties: boolean;
   geometry: boolean;
+  /** Only the placement changed: the element's shape is the same. */
+  placementOnly?: boolean;
   relationships: boolean;
   created: boolean;
 }
@@ -73,7 +79,8 @@ export interface GeometryPatch {
 export type DeltaSource = 'user' | 'agent' | 'undo' | 'redo' | 'revert';
 
 export interface SessionState {
-  state: 'off' | 'starting' | 'ready' | 'unavailable';
+  /** `idle`: not started yet, it starts on first use (large files, or the on-demand setting). */
+  state: 'off' | 'idle' | 'starting' | 'ready' | 'unavailable';
   engine: 'ifcopenshell' | 'web-ifc';
   canQuery: boolean;
   canEdit: boolean;
@@ -233,4 +240,18 @@ export type WebviewToHost =
   | { type: 'selectionResult'; requestId: number; selection: SelectionInfo | null }
   | { type: 'rpc'; id: number; method: RpcMethod; params: Record<string, unknown> }
   /** The toolbar's engine indicator was clicked. */
-  | { type: 'engineAction' };
+  | { type: 'engineAction' }
+  /** The user asked to enable editing: start the idle IfcOpenShell session. */
+  | { type: 'startSession' }
+  /** A sidebar button asked the host to run one of the viewer's own commands. */
+  | { type: 'command'; command: WebviewCommand };
+
+/** Commands the webview may trigger; the host runs only these. */
+export const WEBVIEW_COMMANDS = [
+  'addAgentInstructions',
+  'addAgentTools',
+  'setupIfcOpenShell',
+  'selectEngine',
+  'showLog',
+] as const;
+export type WebviewCommand = (typeof WEBVIEW_COMMANDS)[number];

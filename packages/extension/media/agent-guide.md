@@ -1,6 +1,6 @@
 ---
 name: ifc-viewer
-description: How to show results in the IFC Viewer extension that is connected to this project. Read it before selecting, highlighting, isolating or opening elements in the viewer.
+description: How to work with the IFC Viewer extension that is connected to this project. Read it before querying or editing the live model, writing IFC scripts, or selecting, highlighting, isolating or opening elements in the viewer.
 ---
 
 # IFC Viewer
@@ -9,8 +9,10 @@ Written by IFC Viewer {{VERSION}} when the user clicked Connect to agent. It is
 rewritten on every connect and deleted when the user disconnects, so it always
 matches the running viewer.
 
-The viewer is for the user's eyes. Answer questions from the IFC file itself
-(for example with IfcOpenShell) and never read numbers off the viewer. The two
+The viewer is for the user's eyes; never read numbers off it. When the model is
+editable (`models[].editable` in `state.json`), answer questions from the live
+model with `ifc_live.py` (below): it includes edits the user has not saved yet.
+Otherwise answer from the IFC file itself, for example with IfcOpenShell. The two
 programs talk through files in this folder, `.ifc-skills/viewer/`, which belongs
 to the viewer: never create, edit or delete anything in it except command files
 in `inbox/`.
@@ -30,8 +32,8 @@ atomically; retry a failed read after about 50 ms.
 - `highlights`: the groups on screen, each with `model`, `label`, `color`, `count`.
 
 If it is not connected and the user wants to see something, say: "Open the model
-in the IFC Viewer in your editor and click the plug icon (Connect to agent) in
-the viewer toolbar." Otherwise do not mention the viewer.
+in the IFC Viewer in your editor and click Agent in the status bar at the bottom
+of the viewer (Connect to agent)." Otherwise do not mention the viewer.
 
 ## Send a command
 
@@ -73,7 +75,7 @@ shell, or import it. It needs no registration.
 ```sh
 python .ifc-skills/viewer/ifc_live.py state
 python .ifc-skills/viewer/ifc_live.py query "print(len(model.by_type('IfcWall')))"
-python .ifc-skills/viewer/ifc_live.py query -f .ifc-skills/check.py      # or "-" for stdin
+python .ifc-skills/viewer/ifc_live.py query -f ifc-scripts/find_missing_fire_rating.py   # or "-" for stdin
 python .ifc-skills/viewer/ifc_live.py edit '[{"op":"setAttribute","globalId":"...","name":"Name","value":"X"}]'
 python .ifc-skills/viewer/ifc_live.py highlight --ids ID1 ID2 --label "No fire rating"
 python .ifc-skills/viewer/ifc_live.py repl        # interactive, variables persist
@@ -92,12 +94,36 @@ A script sees `model` (an `ifcopenshell.file`), `ifcopenshell`, `api`
 (`ifcopenshell.api`) and `element_util`. A failing script exits non-zero and prints
 its error; a script that changes the model is one undoable change.
 
+## Keep reusable scripts
+
+Write any script that changes the model, or that the user may want again, to a
+file in `ifc-scripts/` at the project root and run it with `query -f`. Never put
+scripts in `.ifc-skills/`: it is removed when the user disconnects. Inline
+`query "..."` is fine for one-off reads.
+
+- Look in `ifc-scripts/` first. If a script already does something close,
+  adapt it (for example a new value or storey) instead of writing a new one.
+- Start each script with a docstring: what it does, which model it expects,
+  its parameters and the expected result.
+- Put parameters in named constants at the top of the file, or read them from a
+  JSON file next to it. Do not rely on variables left over from the REPL.
+- Prefer selecting elements by rule (class, storey, property) over hard-coded
+  GlobalIds, unless the user asked about specific elements.
+- A script that creates elements checks for existing ones first, so running it
+  twice does not duplicate them.
+- Print what the script changed (class, GlobalId, before and after) so the
+  output can be checked.
+- Tell the user which file you wrote or changed. Saving a script does not save
+  the model; only the user saves the `.ifc` file.
+
 ## Live model tools over MCP (optional)
 
 The same live model is also served as MCP tools, for agents that prefer them.
-Register once per project (Claude Code shown; any MCP client that can launch a
-stdio command works the same way). The shim needs Node 18 or newer and re-reads
-the viewer's current port on every call:
+The user registers them once per project with the command **IFC Viewer: Add
+Agent Tools (MCP)** (writes `.mcp.json`, `.cursor/mcp.json` or `.vscode/mcp.json`).
+By hand (Claude Code shown; any MCP client that can launch a stdio command works
+the same way), the shim needs Node 18 or newer and re-reads the viewer's current
+port on every call:
 
 ```json
 { "mcpServers": { "ifc-viewer": { "command": "node", "args": [".ifc-skills/viewer/mcp-shim.mjs"] } } }
@@ -107,15 +133,16 @@ the viewer's current port on every call:
 | --- | --- |
 | `get_state` | Open models, unsaved changes, selection, highlight groups. |
 | `query` | Run Python against the live model (`model`, `ifcopenshell`, `api`, `element_util` are predefined; `print()` results). |
-| `edit` | Typed edits: `setAttribute`, `setProperty`, `removePset`, `deleteProduct`, `setPlacement`, `assignContainer`, `assignType`, `createProduct`. All apply or none do. |
+| `edit` | Typed edits: `setAttribute`, `setProperty` (keeps the existing value type; a new property takes `valueType`: `text`, `number`, `boolean` or an IFC type such as `IfcLengthMeasure`), `addPset`, `removeProperty`, `removePset`, `deleteProduct`, `setPlacement`, `assignContainer`, `assignType`, `createProduct`. All apply or none do. |
 | `open`, `reload`, `select`, `highlight`, `isolate`, `fit`, `clear` | The same viewer ops as the file protocol above. |
 | `save` | Ask the user to write the unsaved model to disk. They are prompted and may decline. |
 
 How edits work:
 
-- Edits change the model in memory only. The viewer updates at once, highlights
-  what changed as the group "Changed by agent", and marks the file as having
-  unsaved changes. Nothing reaches disk until the user saves; they can undo each
+- Edits change the model in memory only. The viewer updates at once and marks
+  the file as having unsaved changes. It does not colour what changed unless the
+  user turned that on, so use `highlight` yourself when you want to point at
+  something. Nothing reaches disk until the user saves; they can undo each
   edit with the editor's Undo, or revert the whole file.
 - Edit only when the user asked for a change. Say what you changed (class,
   GlobalId, before and after) and offer `save`; never save on your own.
@@ -131,7 +158,8 @@ How edits work:
 ## How to use it
 
 - "This" or "the selected wall": read `selection[0]` and look it up by GlobalId
-  in the file instead of asking the user.
+  instead of asking the user, in the live model when it is editable and in the
+  file otherwise.
 - "Show me": after a query that returns elements, offer to highlight them with a
   short label. Report "highlighted `applied` of `requested`" and name the
   `missing` ids. Branch on `ok`, never on the error text; `ok` with some
@@ -140,7 +168,9 @@ How edits work:
   below them, so send the storey rather than tens of thousands of ids. Types,
   property sets, zones and systems do not resolve: expand them to products first.
 - After an edit, highlight the changed GlobalIds with the label "changed by
-  agent". The viewer reloads an open model when its file changes and re-applies
-  highlights by GlobalId, so keep GlobalIds stable and write the file atomically
-  (temp file, then `os.replace`).
+  agent".
+- Only when the model is not editable and you change the `.ifc` file yourself:
+  the viewer reloads it when the file changes and re-applies highlights by
+  GlobalId, so keep GlobalIds stable and write the file atomically (temp file,
+  then `os.replace`).
 - Spaces and openings are hidden by default; commands that target them show them.
