@@ -18,16 +18,14 @@ export type StandardView = 'iso' | 'top' | 'bottom' | 'front' | 'back' | 'left' 
 export interface ControlHandlers {
   /** Single click on the viewport: pick result, or null when nothing was hit. */
   onPick?: (pick: PickResult | null) => void;
-  /** Escape pressed. */
-  onEscape?: () => void;
-  /** H: hide selection. */
-  onHide?: () => void;
-  /** I: isolate selection. */
-  onIsolate?: () => void;
-  /** A: show all. */
-  onShowAll?: () => void;
-  /** P: toggle the performance HUD. */
-  onTogglePerfHud?: () => void;
+  /**
+   * A key was pressed outside any text field. Return true when it was handled
+   * (the browser default is then suppressed). The viewer routes this to its
+   * action registry, which owns every shortcut.
+   */
+  onKey?: (e: KeyboardEvent) => boolean;
+  /** Right-click without dragging (a drag pans): where, and what was under the pointer. */
+  onContextMenu?: (clientX: number, clientY: number, pick: PickResult | null) => void;
   /** The user finished an orbit/pan/zoom interaction. */
   onInteractionEnd?: () => void;
 }
@@ -79,6 +77,7 @@ export class ViewerControls {
   private readonly doc: Document;
   private readonly keyHandler: (e: KeyboardEvent) => void;
   private readonly dblHandler: (e: MouseEvent) => void;
+  private readonly contextHandler: (e: MouseEvent) => void;
   private readonly clickHandler: (e: MouseEvent) => void;
   private readonly pointerDownHandler: (e: PointerEvent) => void;
   private interacting = false;
@@ -125,6 +124,15 @@ export class ViewerControls {
 
     this.dblHandler = (e) => this.onDoubleClick(e);
     dom.addEventListener('dblclick', this.dblHandler);
+
+    // OrbitControls already suppresses the browser menu; this opens ours when
+    // the right button was pressed and released in place (otherwise it was a pan).
+    this.contextHandler = (e) => {
+      e.preventDefault();
+      if (this.wasDrag(e)) return;
+      this.handlers.onContextMenu?.(e.clientX, e.clientY, this.pickAt(e.clientX, e.clientY));
+    };
+    dom.addEventListener('contextmenu', this.contextHandler);
 
     this.keyHandler = (e) => this.onKey(e);
     this.doc.addEventListener('keydown', this.keyHandler);
@@ -301,32 +309,7 @@ export class ViewerControls {
   private onKey(e: KeyboardEvent): void {
     // Typing in a search or filter field must never drive the viewport.
     if (isEditableTarget(e)) return;
-    switch (e.key) {
-      case 'f':
-      case 'F':
-        this.fitToModel();
-        this.handlers.onInteractionEnd?.();
-        break;
-      case 'h':
-      case 'H':
-        this.handlers.onHide?.();
-        break;
-      case 'i':
-      case 'I':
-        this.handlers.onIsolate?.();
-        break;
-      case 'a':
-      case 'A':
-        this.handlers.onShowAll?.();
-        break;
-      case 'p':
-      case 'P':
-        this.handlers.onTogglePerfHud?.();
-        break;
-      case 'Escape':
-        this.handlers.onEscape?.();
-        break;
-    }
+    if (this.handlers.onKey?.(e)) e.preventDefault();
   }
 
   private onResize(): void {
@@ -339,6 +322,7 @@ export class ViewerControls {
     this.orbit.dispose();
     const dom = this.scene.renderer.domElement;
     dom.removeEventListener('pointerdown', this.pointerDownHandler);
+    dom.removeEventListener('contextmenu', this.contextHandler);
     dom.removeEventListener('click', this.clickHandler);
     dom.removeEventListener('dblclick', this.dblHandler);
     this.doc.removeEventListener('keydown', this.keyHandler);

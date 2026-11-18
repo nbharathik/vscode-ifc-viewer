@@ -2,7 +2,7 @@
   "name": "vscode-ifc-viewer",
   "displayName": "IFC Viewer",
   "description": "Open and explore IFC (.ifc) building models in a real 3D viewer inside VS Code: orbit, spatial tree, selection, properties and psets. Pairs with AI agents such as Claude Code to highlight elements by GlobalId.",
-  "version": "1.4.0",
+  "version": "1.5.1",
   "publisher": "BharathikannanN",
   "license": "MIT",
   "engines": {
@@ -22,8 +22,18 @@
     "onCommand:vscodeIfcViewer.showStatistics",
     "onCommand:vscodeIfcViewer.toggleTree",
     "onCommand:vscodeIfcViewer.toggleProperties",
+    "onCommand:vscodeIfcViewer.setupIfcOpenShell",
+    "onCommand:vscodeIfcViewer.selectEngine",
+    "onCommand:vscodeIfcViewer.showLog",
     "workspaceContains:.ifc-skills/viewer/state.json"
   ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "In an untrusted workspace the viewer stays read-only: Python and IfcOpenShell are not started and agent scripts are disabled.",
+      "restrictedConfigurations": ["ifcViewer.engine.python"]
+    }
+  },
   "contributes": {
     "customEditors": [
       {
@@ -59,8 +69,33 @@
         "category": "IFC Viewer"
       },
       {
+        "command": "vscodeIfcViewer.setupIfcOpenShell",
+        "title": "Set Up IfcOpenShell",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.selectEngine",
+        "title": "Select Engine Mode",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.showLog",
+        "title": "Show Log",
+        "category": "IFC Viewer"
+      },
+      {
         "command": "vscodeIfcViewer.connectAgent",
         "title": "Connect to Agent",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.addAgentInstructions",
+        "title": "Add Agent Instructions",
+        "category": "IFC Viewer"
+      },
+      {
+        "command": "vscodeIfcViewer.addAgentTools",
+        "title": "Add Agent Tools (MCP)",
         "category": "IFC Viewer"
       },
       {
@@ -77,6 +112,79 @@
     "configuration": {
       "title": "IFC Viewer",
       "properties": {
+        "ifcViewer.engine.mode": {
+          "type": "string",
+          "enum": ["auto", "web-ifc", "ifcopenshell"],
+          "enumDescriptions": [
+            "web-ifc draws the model. When Python with IfcOpenShell is available it also holds the live model: editing, queries and agent tools.",
+            "web-ifc only. Read-only, no Python is started.",
+            "Like Automatic, but warn when IfcOpenShell is not available."
+          ],
+          "default": "auto",
+          "order": 20,
+          "description": "How the IFC Viewer uses IfcOpenShell. Reopen IFC files after changing it."
+        },
+        "ifcViewer.engine.start": {
+          "type": "string",
+          "enum": ["auto", "onOpen", "onDemand"],
+          "enumDescriptions": [
+            "Start IfcOpenShell when the file opens for files under 30 MB, and on first use for larger ones.",
+            "Always start IfcOpenShell once the model has appeared.",
+            "Start IfcOpenShell only when you first edit a value or an agent asks for the model."
+          ],
+          "default": "auto",
+          "order": 21,
+          "description": "When the IfcOpenShell session for a file starts. It always starts after the model has appeared, never before."
+        },
+        "ifcViewer.engine.maxFileSizeMb": {
+          "type": "integer",
+          "default": 200,
+          "minimum": 1,
+          "maximum": 100000,
+          "order": 21,
+          "description": "Files larger than this stay read-only (web-ifc only), because IfcOpenShell needs roughly 8 to 10 times the file size in memory."
+        },
+        "ifcViewer.engine.scriptTimeoutSeconds": {
+          "type": "integer",
+          "default": 120,
+          "minimum": 5,
+          "maximum": 3600,
+          "order": 21,
+          "description": "A script run by an agent or the Python client that takes longer than this is stopped. IfcOpenShell restarts and your unsaved edits are restored."
+        },
+        "ifcViewer.engine.idleMinutes": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 0,
+          "maximum": 1440,
+          "order": 21,
+          "description": "A hidden IFC tab without unsaved edits frees its IfcOpenShell memory after this many minutes, and restarts it when needed. 0 never frees it."
+        },
+        "ifcViewer.engine.python": {
+          "type": "string",
+          "default": "",
+          "order": 21,
+          "scope": "machine-overridable",
+          "markdownDescription": "Python interpreter with `ifcopenshell>=0.8.4,<0.9` installed. Leave empty to use the environment from **IFC Viewer: Set Up IfcOpenShell**, then `py -3` / `python3` / `python` on the PATH."
+        },
+        "ifcViewer.engine.allowScripts": {
+          "type": "boolean",
+          "default": true,
+          "order": 22,
+          "markdownDescription": "Let a connected agent run Python scripts against the live model (the `query` tool). Edits stay in memory until you save. Always off in untrusted workspaces."
+        },
+        "ifcViewer.engine.highlightAgentEdits": {
+          "type": "boolean",
+          "default": false,
+          "order": 23,
+          "description": "Colour the elements an agent changed through the live model in amber (the group \"Changed by agent\"). Off by default so updates look clean; the Agent tab still counts the changed elements."
+        },
+        "ifcViewer.agentBridge.mcpTools": {
+          "type": "boolean",
+          "default": true,
+          "order": 24,
+          "markdownDescription": "While connected, also serve agent tools (select, highlight, query, edit, save) on a local port, reachable through `.ifc-skills/viewer/mcp-shim.mjs`. The file protocol keeps working either way."
+        },
         "ifcViewer.agentBridge.enabled": {
           "type": "boolean",
           "default": true,
@@ -204,11 +312,12 @@
     "build:watch": "node esbuild.mjs --watch",
     "compile:test": "tsc -p tsconfig.test.json",
     "test:ext": "npm run build && npm run compile:test && node ./out-test/test/runTest.js",
+    "test:ext:insiders": "npm run build && npm run compile:test && node ./out-test/test/runTestInsiders.js",
     "test:ext:packaged": "npm run build && npm run compile:test && node ./out-test/test/runTestPackaged.js",
     "package": "node esbuild.mjs --production && vsce package --no-dependencies -o ../../"
   },
   "dependencies": {
-    "@vscode-ifc-viewer/core": "1.4.0"
+    "@vscode-ifc-viewer/core": "1.5.0"
   },
   "devDependencies": {
     "@types/mocha": "10.0.10",

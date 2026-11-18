@@ -120,13 +120,22 @@ describe('agent bridge (file protocol)', function () {
     assert.strictEqual(fs.readFileSync(path.join(workspace, '.ifc-skills', '.gitignore'), 'utf8'), '*\n');
   });
 
+  it('connecting writes the agent guide stamped with the viewer version', () => {
+    const guide = fs.readFileSync(path.join(bridgeDir, 'SKILL.md'), 'utf8');
+    assert.ok(guide.startsWith('---\nname: ifc-viewer\n'), 'skill frontmatter');
+    const version = vscode.extensions.getExtension(EXTENSION_ID)!.packageJSON.version as string;
+    assert.ok(guide.includes(`IFC Viewer ${version}`), 'version stamp');
+    assert.ok(!guide.includes('{{VERSION}}'), 'no unfilled placeholder');
+  });
+
   it('an "open" command opens the model and acknowledges once it loaded', async () => {
     const inboxFile = drop({ id: 'open-1', op: 'open', model: MODEL });
     const a = await ack('open-1');
     assert.strictEqual(a.ok, true, a.error ?? '');
     assert.strictEqual(a.applied, 1);
     assert.strictEqual(a.model, MODEL);
-    assert.strictEqual(fs.existsSync(inboxFile), false, 'the inbox file is removed');
+    // The viewer deletes the command right after writing its answer.
+    await waitFor(() => (fs.existsSync(inboxFile) ? undefined : true), 5000, 'the inbox file is removed');
     const s = await state((x) => x.models.some((m) => m.path === MODEL && m.loadedAt !== null), 'model loaded');
     assert.ok(typeof s.models[0].fileMtimeMs === 'number');
   });

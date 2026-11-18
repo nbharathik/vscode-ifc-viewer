@@ -2,7 +2,7 @@
 // suite inside the extension host. On CI this runs under xvfb (Linux).
 import * as path from 'path';
 import { runTests } from '@vscode/test-electron';
-import { makeTestWorkspace } from './workspace';
+import { makeTestWorkspace, prepareFixtures } from './workspace';
 
 async function main(): Promise<void> {
   // Inherited from Electron-based terminals (IDE integrations); makes the
@@ -19,7 +19,8 @@ async function main(): Promise<void> {
   // (On a dev box where stable VS Code is mid-update, 'insiders' avoids the
   // shared Inno Setup update mutex that blocks launching the downloaded build.)
   const version = process.env.VSCODE_VERSION || 'stable';
-  const fixtures = path.join(repoRoot, 'fixtures');
+  // Pristine, freshly generated fixtures: never the shared (editable) fixtures/.
+  const fixtures = prepareFixtures(repoRoot);
   const workspace = makeTestWorkspace(fixtures);
 
   await runTests({
@@ -27,7 +28,8 @@ async function main(): Promise<void> {
     extensionDevelopmentPath,
     extensionTestsPath,
     extensionTestsEnv: { IFC_FIXTURES: fixtures, IFC_TEST_WORKSPACE: workspace },
-    launchArgs: [workspace, '--disable-extensions', '--disable-gpu'],
+    // Trust the throwaway workspace: the editing engine only starts in trusted ones.
+    launchArgs: [workspace, '--disable-extensions', '--disable-gpu', '--disable-workspace-trust'],
   });
 }
 

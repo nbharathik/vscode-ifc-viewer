@@ -5,6 +5,6 @@
     "types": ["node", "vscode"],
     "noEmit": true
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "tests/node/**/*.ts"],
   "exclude": ["node_modules", "dist", "out-test", "src/test/**/*.ts", "src/webview/**/*.ts"]
 }

@@ -20,6 +20,7 @@ packages/viewer-core/tests/**/__snapshots__/**/*-diff.png
 __pycache__/
 *.pyc
 .vscode-test/
+.vscode/settings.json
 .probe/
 
 packages/viewer-core/harness/public/

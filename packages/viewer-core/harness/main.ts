@@ -5,6 +5,9 @@
 // (web-ifc.wasm, fixtures) are served from /public by the Vite stage plugin.
 import { createViewer } from '../src/viewer.js';
 import { CancelledError } from '../src/engine/types.js';
+import type { ModelSession } from '../src/engine/session.js';
+import type { StatusItemHandle } from '../src/panels/statusbar.js';
+import type { SidebarTabHandle } from '../src/panels/sidebar.js';
 import type { HarnessHooks } from './harness-types.js';
 
 const app = document.getElementById('app');
@@ -98,6 +101,9 @@ async function loadLocalFile(file: File): Promise<void> {
 let highlightEvents = 0;
 viewer.onHighlightsChange(() => highlightEvents++);
 let testToolbarClicks = 0;
+let testActionRuns = 0;
+let testStatusItem: StatusItemHandle | null = null;
+let testSidebarTab: SidebarTabHandle | null = null;
 
 const hooks: HarnessHooks = {
   loadFixture,
@@ -129,6 +135,10 @@ const hooks: HarnessHooks = {
   isTreeVisible: () => viewer.isTreeVisible(),
   setPropertiesVisible: (visible) => viewer.setPropertiesVisible(visible),
   arePropertiesVisible: () => viewer.arePropertiesVisible(),
+  setShelfVisible: (visible) => viewer.setShelfVisible(visible),
+  isShelfVisible: () => viewer.isShelfVisible(),
+  showSidebarTab: (id) => viewer.showSidebarTab(id),
+  getSidebarTab: () => viewer.getSidebarTab(),
   setPanelsVisible: (visible) => viewer.setPanelsVisible(visible),
   arePanelsVisible: () => viewer.arePanelsVisible(),
   togglePanels: () => viewer.togglePanels(),
@@ -170,12 +180,92 @@ const hooks: HarnessHooks = {
     });
   },
   getTestToolbarClicks: () => testToolbarClicks,
+  registerTestAction: () => {
+    viewer.registerAction({ id: 'host.test', label: 'Host test action', group: 'Host', run: () => testActionRuns++ });
+  },
+  getTestActionRuns: () => testActionRuns,
+  addTestSidebarTab: () => {
+    testSidebarTab = viewer.addSidebarTab({ id: 'demo', label: 'Demo' });
+    if (!testSidebarTab) return false;
+    testSidebarTab.body.textContent = 'Demo body';
+    testSidebarTab.setBadge('2');
+    return true;
+  },
+  removeTestSidebarTab: () => testSidebarTab?.remove(),
+  addTestStatusItem: () => {
+    testStatusItem = viewer.addStatusItem({ id: 'demo', text: 'Demo', title: 'A demo item' });
+  },
+  updateTestStatusItem: (text) => testStatusItem?.setText(text),
+  removeTestStatusItem: () => testStatusItem?.remove(),
   isReady: () => viewer.isReady(),
   render: () => viewer.render(),
   setPerfHud: () => viewer.togglePerfHud(),
   getLoadTimeline: () => viewer.getLoadTimeline(),
   cancelLoad: () => viewer.cancelLoad(),
   getResolutionScale: () => viewer.getResolutionScale(),
+  applyDelta: (delta, patch) => viewer.applyDelta(delta, patch),
+  installStubSession: () => {
+    viewer.setSession(stubSession, { state: 'ready', engine: 'ifcopenshell', canQuery: false, canEdit: true });
+  },
+  installIdleSession: () => {
+    const idle: ModelSession = {
+      ...stubSession,
+      start: () => {
+        sessionStarts++;
+        // The host would start the server; the stub becomes ready at once.
+        viewer.setSession(stubSession, { state: 'ready', engine: 'ifcopenshell', canQuery: false, canEdit: true });
+      },
+    };
+    viewer.setSession(idle, { state: 'idle', engine: 'web-ifc', canQuery: false, canEdit: false });
+  },
+  getSessionStarts: () => sessionStarts,
+  getEditLog: () => editLog,
+  getEditEvents: () => editEvents,
+};
+let sessionStarts = 0;
+
+// A fake editing session: canned properties, and it records every edit.
+const editLog: unknown[] = [];
+let editEvents = 0;
+viewer.onModelEdited(() => editEvents++);
+const stubSession: ModelSession = {
+  getProperties: async (expressID) => ({
+    expressID,
+    type: 'IfcWall',
+    attributes: [
+      { name: 'GlobalId', value: 'STUBGLOBALID0000000000', unit: null },
+      { name: 'Name', value: 'Stub wall', unit: null },
+      { name: 'Description', value: null, unit: null },
+    ],
+    psets: [
+      {
+        expressID: 900,
+        name: 'Pset_Stub',
+        kind: 'pset',
+        properties: [
+          { name: 'FireRating', value: 'F30', unit: null },
+          { name: 'IsExternal', value: true, unit: null },
+          { name: 'Width', value: 0.2, unit: null },
+        ],
+      },
+    ],
+  }),
+  getTree: async () => {
+    throw new Error('stub');
+  },
+  resolveGlobalIds: async () => {
+    throw new Error('stub: fall back to the render engine');
+  },
+  globalIdOf: async () => {
+    throw new Error('stub: fall back to the render engine');
+  },
+  edit: async (ops) => {
+    // The server explains why it refuses a value; the stub does the same for one magic word.
+    if (ops.some((op) => 'value' in op && op.value === 'REJECT')) throw new Error('Value is not allowed here.');
+    editLog.push(...ops);
+  },
+  undo: async () => undefined,
+  redo: async () => undefined,
 };
 
 window.__viewer = hooks;
