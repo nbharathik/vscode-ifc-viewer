@@ -291,6 +291,15 @@ describe('live IfcOpenShell engine', function () {
     assert.strictEqual(count.status, 0, count.stderr);
     assert.strictEqual(count.stdout.trim(), '6');
 
+    // --model reaches the viewer for every command: naming the open model works,
+    // naming another one is refused instead of quietly using the open model.
+    const named = await run([client, '--model', MODEL, 'query', "print(len(model.by_type('IfcWall')))"]);
+    assert.strictEqual(named.status, 0, named.stderr);
+    assert.strictEqual(named.stdout.trim(), '6');
+    const elsewhere = await run([client, '--model', 'models/missing.ifc', 'query', 'print(1)']);
+    assert.strictEqual(elsewhere.status, 1, elsewhere.stdout);
+    assert.match(elsewhere.stderr, /does not exist/);
+
     const failing = await run([client, 'query', 'raise RuntimeError("boom")']);
     assert.strictEqual(failing.status, 1);
     assert.match(failing.stderr, /boom/);

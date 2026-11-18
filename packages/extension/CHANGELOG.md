@@ -3,6 +3,14 @@
 All notable changes to IFC Viewer are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## 1.5.1
+
+### Fixed
+- **`ifc_live.py --model` was ignored.** With several models open, commands given
+  `--model` (and calls on `Live(model=...)` that named no model themselves) went
+  to the active model instead of the named one. They now reach the named model,
+  and a model that is not there is reported instead of quietly using another.
+
 ## 1.5.0
 
 **Edit with IfcOpenShell, and a calmer viewer.** The viewer can now hold your

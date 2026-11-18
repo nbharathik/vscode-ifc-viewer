@@ -2,7 +2,7 @@
   "name": "vscode-ifc-viewer",
   "displayName": "IFC Viewer",
   "description": "Open and explore IFC (.ifc) building models in a real 3D viewer inside VS Code: orbit, spatial tree, selection, properties and psets. Pairs with AI agents such as Claude Code to highlight elements by GlobalId.",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "publisher": "BharathikannanN",
   "license": "MIT",
   "engines": {

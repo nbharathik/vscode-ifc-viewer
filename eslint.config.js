@@ -16,6 +16,10 @@ export default tseslint.config(
       '**/.vscode-test/**',
       '**/out-test/**',
       'artifacts/**',
+      // Maintainer-only tooling and the paper workspace. The bench scripts opt
+      // out per file; run workspaces kept under .work/ hold generated code that
+      // is not ours to lint.
+      'dev/**',
       'fixtures/**',
       'playwright-report/**',
       'test-results/**',

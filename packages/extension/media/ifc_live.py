@@ -106,7 +106,9 @@ class Live:
 
     def _call(self, tool, timeout=None, **arguments):
         url, token = self._target()
-        if self.model and "model" not in arguments:
+        # Every method passes model=None when the call names none, so fall back on
+        # the connection's model (--model, or Live(model=...)) for those too.
+        if self.model and arguments.get("model") is None:
             arguments["model"] = self.model
         arguments = {key: value for key, value in arguments.items() if value is not None}
         self._ids += 1
